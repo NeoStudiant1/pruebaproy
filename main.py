@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 
 def obtener_scrapers_disponibles() -> List[dict]:
-    
     scrapers = []
 
     try:
@@ -65,6 +64,7 @@ def obtener_scrapers_disponibles() -> List[dict]:
         logger.warning(f"No se pudo cargar scraper ILO: {e}")
 
     return scrapers
+
 
 CARPETA_DESCARGA = "./documentos_descargados"
 
@@ -286,6 +286,7 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
                 "url_fuente": doc.url_fuente,
                 "archivo_local": "DESCARGA_FALLIDA",
             })
+
         if i < len(resultados):
             time.sleep(1)
 
@@ -330,7 +331,6 @@ def generar_csv_metadatos(datos: List[dict], ruta_csv: str):
     except Exception as e:
         logger.error(f"Error al generar CSV de metadatos: {e}", exc_info=True)
         print(f"  Error al generar el archivo de metadatos: {e}")
-
 
 
 def diagnostico():
