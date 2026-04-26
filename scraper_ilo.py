@@ -35,7 +35,7 @@ MAPA_TIPOS_ILO = {
 
 class ILOLabordocScraper(BaseScraper):
 
-    RESULTADOS_POR_PAGINA = 10  
+    RESULTADOS_POR_PAGINA = 10 
 
     def nombre_fuente(self) -> str:
         return "ILO Labordoc"
@@ -148,11 +148,9 @@ class ILOLabordocScraper(BaseScraper):
             f"&lang=en"
         )
 
-        if filtros.idioma:
-            for codigo_idioma in filtros.idioma:
-                if codigo_idioma in MAPA_IDIOMAS_ILO:
-                    codigo = MAPA_IDIOMAS_ILO[codigo_idioma]
-                    url += f"&mfacet=lang,include,{codigo},1"
+        if filtros.idioma and filtros.idioma in MAPA_IDIOMAS_ILO:
+            codigo = MAPA_IDIOMAS_ILO[filtros.idioma]
+            url += f"&mfacet=lang,include,{codigo},1"
 
         if filtros.tipo_documento:
             clave_tipo = filtros.tipo_documento.lower()
@@ -240,6 +238,7 @@ class ILOLabordocScraper(BaseScraper):
             url_limpia = html_module.unescape(url_registro)
 
             pagina.goto(url_limpia, wait_until="networkidle", timeout=45000)
+
             time.sleep(6)
 
             html_contenido = pagina.content()
@@ -295,8 +294,8 @@ class ILOLabordocScraper(BaseScraper):
             urls_filtradas = [
                 u for u in urls_unicas
                 if not any(excl in u.lower() for excl in [
-                    '/thumbnail/',     
-                    'ignoredefault',     
+                    '/thumbnail/',      
+                    'ignoredefault',    
                     '.css', '.js', '.png', '.jpg', '.gif', '.svg',
                     'google.com', 'facebook.com', 'twitter.com',
                     'analytics', 'tracking',

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 import os
 import sys
 import csv
@@ -23,7 +24,6 @@ FORMATO_CONSOLA = "%(message)s"
 def configurar_logging():
     logger_raiz = logging.getLogger()
     logger_raiz.setLevel(logging.DEBUG)
-
     logger_raiz.handlers.clear()
 
     handler_archivo = logging.FileHandler("errores.log", mode="w", encoding="utf-8")
@@ -134,7 +134,6 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     print("-" * 50)
     print("  (Deja en blanco para omitir un filtro)")
     print()
-
     while True:
         entrada = input("  Palabras clave (separadas por coma): ").strip()
         if entrada:
@@ -143,33 +142,29 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
         print("  Las palabras clave son obligatorias. Escribe al menos un termino.")
 
     print()
-    anio_desde = input("  Anio desde (ej: 2015): ").strip()
+    anio_desde = input("  Año desde (ej: 2015): ").strip()
     if anio_desde:
         try:
             filtros.anio_desde = int(anio_desde)
         except ValueError:
-            print("  Valor no valido. Se omite el filtro de anio inicial.")
+            print("  Valor no valido. Se omite el filtro de año inicial.")
 
-    anio_hasta = input("  Anio hasta (ej: 2024): ").strip()
+    anio_hasta = input("  Año hasta (ej: 2024): ").strip()
     if anio_hasta:
         try:
             filtros.anio_hasta = int(anio_hasta)
         except ValueError:
-            print("  Valor no valido. Se omite el filtro de anio final.")
+            print("  Valor no valido. Se omite el filtro de año final.")
 
     print()
-    print("  Idiomas disponibles (puedes elegir varios separados por coma):")
+    print("  Idiomas disponibles:")
     print("    en = Ingles | es = Espanol | fr = Frances")
     print("    ar = Arabe  | zh = Chino   | ru = Ruso")
-    idioma_input = input("  Codigo(s) de idioma (ej: es, en): ").strip().lower()
-    if idioma_input:
-        codigos_validos = {"en", "es", "fr", "ar", "zh", "ru"}
-        idiomas = [c.strip() for c in idioma_input.split(",") if c.strip()]
-        idiomas_ok = [c for c in idiomas if c in codigos_validos]
-        if idiomas_ok:
-            filtros.idioma = idiomas_ok
-        else:
-            print("  Ningun codigo reconocido. Se buscara en todos los idiomas.")
+    idioma = input("  Codigo de idioma (ej: es): ").strip().lower()
+    if idioma in ("en", "es", "fr", "ar", "zh", "ru"):
+        filtros.idioma = idioma
+    elif idioma:
+        print("  Codigo no reconocido. Se buscara en todos los idiomas.")
 
     print()
     print("  Tipos de documento:")
@@ -215,9 +210,9 @@ def confirmar_busqueda(filtros: FiltrosBusqueda, nombre_fuente: str) -> bool:
     print("-" * 50)
     print(f"  Fuente:            {nombre_fuente}")
     print(f"  Palabras clave:    {', '.join(filtros.palabras_clave)}")
-    print(f"  Anio desde:        {filtros.anio_desde or 'Sin limite'}")
-    print(f"  Anio hasta:        {filtros.anio_hasta or 'Sin limite'}")
-    print(f"  Idioma:            {', '.join(filtros.idioma) if filtros.idioma else 'Todos'}")
+    print(f"  Año desde:        {filtros.anio_desde or 'Sin limite'}")
+    print(f"  Año hasta:        {filtros.anio_hasta or 'Sin limite'}")
+    print(f"  Idioma:            {filtros.idioma or 'Todos'}")
     print(f"  Tipo de documento: {filtros.tipo_documento or 'Cualquiera'}")
     print(f"  Limite:            {filtros.limite} documentos")
     print("-" * 50)
@@ -269,7 +264,7 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             archivos_descargados.append({
                 "titulo": doc.titulo,
                 "autor": doc.autor,
-                "anio": doc.anio,
+                "año": doc.anio,
                 "idioma": doc.idioma,
                 "tipo_documento": doc.tipo_documento,
                 "url_fuente": doc.url_fuente,
@@ -280,7 +275,7 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             archivos_descargados.append({
                 "titulo": doc.titulo,
                 "autor": doc.autor,
-                "anio": doc.anio,
+                "año": doc.anio,
                 "idioma": doc.idioma,
                 "tipo_documento": doc.tipo_documento,
                 "url_fuente": doc.url_fuente,
@@ -319,7 +314,7 @@ def generar_csv_metadatos(datos: List[dict], ruta_csv: str):
     if not datos:
         return
 
-    campos = ["titulo", "autor", "anio", "idioma", "tipo_documento", "url_fuente", "archivo_local"]
+    campos = ["titulo", "autor", "año", "idioma", "tipo_documento", "url_fuente", "archivo_local"]
 
     try:
         with open(ruta_csv, "w", newline="", encoding="utf-8-sig") as f:

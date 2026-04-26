@@ -25,7 +25,7 @@ class FiltrosBusqueda:
     palabras_clave: List[str] = field(default_factory=list)
     anio_desde: Optional[int] = None
     anio_hasta: Optional[int] = None
-    idioma: Optional[List[str]] = None
+    idioma: Optional[str] = None
     tipo_documento: Optional[str] = None
     limite: int = 50
 

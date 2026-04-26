@@ -218,14 +218,12 @@ class UNDigitalLibraryScraper(BaseScraper):
         )
         urls_pdf = list(set(f"{BASE_URL}{u}" for u in urls_relativas))
 
-        if filtros.idioma:
-            sufijos = [MAPA_IDIOMAS[c] for c in filtros.idioma if c in MAPA_IDIOMAS]
-            if sufijos:
-                urls_filtradas = [u for u in urls_pdf
-                                if any(f"-{s}." in u.upper() or f"-{s}" in u.upper()
-                                       for s in sufijos)]
-                if urls_filtradas:
-                    urls_pdf = urls_filtradas
+        if filtros.idioma and filtros.idioma in MAPA_IDIOMAS:
+            sufijo = MAPA_IDIOMAS[filtros.idioma]
+            urls_filtradas = [u for u in urls_pdf
+                            if f"-{sufijo}." in u.upper() or f"-{sufijo}" in u.upper()]
+            if urls_filtradas:
+                urls_pdf = urls_filtradas
 
         doc.urls_descarga = urls_pdf
 

@@ -4,7 +4,6 @@ Herramienta de linea de comandos para buscar y descargar documentos PDF
 desde la Biblioteca Digital de Naciones Unidas (UN Digital Library) y el
 repositorio Labordoc de la Organizacion Internacional del Trabajo (OIT).
 
-
 ## Requisitos previos
 
 - Python 3.9 o superior
@@ -118,7 +117,7 @@ python main.py
 3. **Configurar filtros:**
    - Palabras clave (obligatorio): Escribe los terminos separados por coma.
      Ejemplo: `climate change, sustainable development`
-   - Rango de fechas: Anio desde y anio hasta (opcional).
+   - Rango de fechas: Año desde y año hasta (opcional).
    - Idioma: Codigo de dos letras (en, es, fr, ar, zh, ru) o dejar vacio.
    - Tipo de documento: reporte, resolucion, acuerdo, decision, carta.
    - Limite de documentos: Por defecto 50. Maximo recomendado 200.
