@@ -1,418 +1,389 @@
-"""
-scraper_ilo.py — Scraper para Labordoc ILO (labordoc.ilo.org).
-
-Estrategia:
-  - Labordoc usa Ex Libris Primo VE, que carga con Angular (JavaScript)
-  - Se usa Playwright (navegador headless) para renderizar la página
-  - Se parsean los resultados con BeautifulSoup
-  - Los PDFs se descargan directamente con requests
-  
-  Alternativa sin JS (si Playwright no está disponible):
-  - Se intenta la API interna de Primo VE directamente via requests
-"""
-
+# -*- coding: utf-8 -*-
+import os
 import re
 import time
-import json
-from pathlib import Path
-
+import logging
 import requests
-from colorama import Fore, Style
-from tqdm import tqdm
+from typing import List, Optional
+from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
 
-from utils import sanitizar_nombre, obtener_dir_temporal
+logger = logging.getLogger(__name__)
 
-BASE_URL   = "https://labordoc.ilo.org"
-SEARCH_URL = f"{BASE_URL}/discovery/search"
-VID        = "41ILO_INST:41ILO_V2"
-TAB        = "41ILO_V2"
-SCOPE      = "41ILO_INST"
-TIMEOUT    = 45
-HEADERS    = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept"         : "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-    "Referer"        : BASE_URL,
+VID = "41ILO_INST:41ILO_V2"
+TAB = "ILO_DigiColl"
+SEARCH_SCOPE = "ILO_DigiColl"
+BASE_URL = "https://labordoc.ilo.org"
+
+MAPA_IDIOMAS_ILO = {
+    "es": "spa",
+    "en": "eng",
+    "fr": "fre",
+    "ar": "ara",
+    "zh": "chi",
+    "ru": "rus",
 }
 
-# API interna de Primo VE
-PRIMO_API_URL = f"{BASE_URL}/primaws/rest/pub/pnxs"
+MAPA_TIPOS_ILO = {
+    "reporte": "reports",
+    "resolucion": "government_documents",
+    "acuerdo": "government_documents",
+    "libro": "books",
+    "articulo": "articles",
+}
 
 
-class ScraperILO:
-    """
-    Scraper para Labordoc ILO.
-    Intenta primero la API interna de Primo VE (rápida).
-    Si falla, usa Playwright (navegador headless).
-    """
+class ILOLabordocScraper(BaseScraper):
 
-    def __init__(self, palabras_clave: list[str], cantidad_max: int):
-        self.palabras_clave = palabras_clave
-        self.cantidad_max   = cantidad_max
-        self.session        = requests.Session()
-        self.session.headers.update(HEADERS)
-        self._playwright_disponible = self._verificar_playwright()
+    RESULTADOS_POR_PAGINA = 10  
 
-    # Verificación de dependencias
-    @staticmethod
-    def _verificar_playwright() -> bool:
+    def nombre_fuente(self) -> str:
+        return "ILO Labordoc"
+
+    def search(self, filtros: FiltrosBusqueda) -> List[DocumentoResultado]:
+        resultados = []
+
+        query = " ".join(filtros.palabras_clave) if filtros.palabras_clave else ""
+        if not query:
+            logger.error("No se proporcionaron palabras clave para la busqueda.")
+            return []
+
+        logger.info(f"Iniciando busqueda en ILO Labordoc: '{query}'")
+        logger.info(f"Limite configurado: {filtros.limite} documentos")
+
         try:
             from playwright.sync_api import sync_playwright
-            return True
         except ImportError:
-            return False
-
-    # Punto de entrada
-    def ejecutar(self) -> list[dict]:
-        """Busca y descarga documentos para todas las palabras clave."""
-        resultados_totales = []
-
-        for keyword in self.palabras_clave:
-            print(f"\n  {Fore.GREEN}🔍 Labordoc ILO — buscando: {Fore.YELLOW}{keyword}{Style.RESET_ALL}")
-
-            # Intentar primero API interna
-            registros = self._buscar_via_api(keyword)
-
-            if not registros and self._playwright_disponible:
-                print(f"  {Fore.YELLOW}  → API interna sin resultados. Intentando con navegador...")
-                registros = self._buscar_via_playwright(keyword)
-
-            if not registros:
-                print(f"  {Fore.RED}  ✘ Sin resultados para '{keyword}' en Labordoc ILO.")
-                if not self._playwright_disponible:
-                    print(f"  {Fore.YELLOW}  ℹ Para mejores resultados instala Playwright:")
-                    print(f"      pip install playwright && playwright install chromium")
-                continue
-
-            print(f"  {Fore.CYAN}  → {len(registros)} documento(s) encontrados. Descargando...")
-
-            for registro in tqdm(registros, desc=f"    Descargando", unit="doc",
-                                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}"):
-                resultado = self._descargar_documento(registro, keyword)
-                if resultado:
-                    resultados_totales.append(resultado)
-                time.sleep(1.0)
-
-        return resultados_totales
-
-    # Método 1: API interna de Primo VE
-    def _buscar_via_api(self, keyword: str) -> list[dict]:
-        """
-        Usa el endpoint interno /primaws/rest/pub/pnxs de Primo VE.
-        Este endpoint es usado por el frontend Angular y no requiere API key.
-        Soporta paginación con offset + limit.
-        """
-        registros  = []
-        offset     = 0
-        limit      = min(25, self.cantidad_max)
-        total_api  = None
-
-        while len(registros) < self.cantidad_max:
-            limite_actual = min(limit, self.cantidad_max - len(registros))
-
-            params = {
-                "blendFacetsSeparately" : False,
-                "disableCache"          : False,
-                "getMore"               : 0,
-                "inst"                  : "41ILO_INST",
-                "lang"                  : "en",
-                "limit"                 : limite_actual,
-                "newspapersActive"      : False,
-                "newspapersSearch"      : False,
-                "offset"                : offset,
-                "otbRanking"            : False,
-                "pcAvailability"        : False,
-                "q"                     : f"any,contains,{keyword}",
-                "qExclude"              : "",
-                "qInclude"              : "",
-                "rapido"                : False,
-                "refEntryActive"        : False,
-                "rtaLinks"              : True,
-                "scope"                 : SCOPE,
-                "skipDelivery"          : "Y",
-                "sort"                  : "rank",
-                "tab"                   : TAB,
-                "vid"                   : VID,
-            }
-
-            try:
-                resp = self.session.get(
-                    PRIMO_API_URL,
-                    params=params,
-                    timeout=TIMEOUT,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            except (requests.RequestException, json.JSONDecodeError) as e:
-                # Silenciar errores de API interna; se usará Playwright como fallback
-                return []
-
-            docs = data.get("docs", [])
-            if not docs:
-                break
-
-            if total_api is None:
-                total_api = data.get("info", {}).get("total", 0)
-
-            for doc in docs:
-                parsed = self._parsear_doc_primo(doc)
-                if parsed:
-                    registros.append(parsed)
-
-            offset += len(docs)
-            if total_api and offset >= total_api:
-                break
-
-            time.sleep(0.8)
-
-        return registros[:self.cantidad_max]
-
-    def _parsear_doc_primo(self, doc: dict) -> dict | None:
-        """Extrae metadatos de un documento JSON de Primo VE."""
-        pnx = doc.get("pnx", {})
-
-        display  = pnx.get("display", {})
-        control  = pnx.get("control", {})
-        links    = pnx.get("links", {})
-        delivery = doc.get("delivery", {})
-
-        # Título
-        titulo_raw = display.get("title", [""])[0] if display.get("title") else ""
-        titulo = re.sub(r"<[^>]+>", "", titulo_raw).strip()
-
-        # Autor
-        creadores = display.get("creator", []) or display.get("contributor", [])
-        autor = creadores[0] if creadores else ""
-
-        # Año
-        anio = ""
-        fecha_raw = display.get("creationdate", [""])[0] if display.get("creationdate") else ""
-        if fecha_raw:
-            m = re.search(r"\b(19|20)\d{2}\b", fecha_raw)
-            anio = m.group() if m else fecha_raw[:4]
-
-        # Idioma
-        idioma_raw = display.get("language", [""])[0] if display.get("language") else ""
-        idioma = idioma_raw.upper()[:3]
-
-        # Tipo
-        tipo = display.get("type", [""])[0] if display.get("type") else ""
-
-        # ID del registro
-        record_id = control.get("recordid", [""])[0] if control.get("recordid") else ""
-
-        # URL de la página del documento
-        url_pagina = f"{BASE_URL}/discovery/fulldisplay?vid={VID}&docid={record_id}" if record_id else ""
-
-        # Buscar URL de PDF en los links del documento
-        url_pdf = self._extraer_url_pdf(links, delivery, doc)
-
-        if not titulo and not record_id:
-            return None
-
-        return {
-            "record_id" : record_id,
-            "titulo"    : titulo,
-            "autor"     : autor,
-            "anio"      : anio,
-            "idioma"    : idioma,
-            "tipo"      : tipo,
-            "url_pdf"   : url_pdf,
-            "url_pagina": url_pagina,
-        }
-
-    def _extraer_url_pdf(self, links: dict, delivery: dict, doc: dict) -> str:
-        """Busca URLs de PDF en la estructura del documento Primo VE."""
-        # 1. Links directos
-        for key in ("linktopdf", "openurlfulltext", "linktorsrc"):
-            vals = links.get(key, [])
-            for val in vals:
-                if isinstance(val, str) and ".pdf" in val.lower():
-                    return val
-
-        # 2. Links de entrega
-        best_urls = delivery.get("bestlocation", {})
-        if isinstance(best_urls, dict):
-            url = best_urls.get("urls", {})
-            if isinstance(url, dict):
-                for u in url.values():
-                    if u and ".pdf" in str(u).lower():
-                        return str(u)
-
-        # 3. Todos los links disponibles (buscar PDF)
-        for key, vals in links.items():
-            if isinstance(vals, list):
-                for val in vals:
-                    if isinstance(val, str) and ("pdf" in val.lower() or "download" in val.lower()):
-                        return val
-
-        # 4. Buscar en openURL
-        openurl_vals = links.get("openurl", [])
-        return openurl_vals[0] if openurl_vals else ""
-
-    # Método 2: Playwright
-    def _buscar_via_playwright(self, keyword: str) -> list[dict]:
-        """
-        Usa un navegador headless (Chromium) para renderizar la página
-        y extraer los resultados cargados por JavaScript.
-        """
-        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-        from bs4 import BeautifulSoup
-
-        registros = []
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 900},
+            logger.error(
+                "Playwright no esta instalado. Ejecuta:\n"
+                "  pip install playwright\n"
+                "  playwright install chromium"
             )
-            page = context.new_page()
+            return []
 
-            url_busqueda = (
-                f"{SEARCH_URL}"
-                f"?vid={VID}"
-                f"&tab={TAB}"
-                f"&scope={SCOPE}"
-                f"&query=any,contains,{requests.utils.quote(keyword)}"
-                f"&limit={min(25, self.cantidad_max)}"
+        with sync_playwright() as pw:
+            navegador = pw.chromium.launch(headless=True)
+            contexto = navegador.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
             )
+            pagina = contexto.new_page()
 
-            try:
-                page.goto(url_busqueda, wait_until="networkidle", timeout=60000)
-                # Esperar que carguen los resultados de Angular
-                page.wait_for_selector("prm-search-result-list", timeout=15000)
-                time.sleep(2)
-            except PlaywrightTimeout:
-                browser.close()
-                return []
+            pagina.set_default_timeout(45000)
 
-            html = page.content()
-            browser.close()
+            offset = 0
+            documentos_obtenidos = 0
 
-        soup = BeautifulSoup(html, "lxml")
-        items = soup.select("prm-brief-result-container")
+            while documentos_obtenidos < filtros.limite:
+                url_busqueda = self._construir_url_busqueda(query, filtros, offset)
+                logger.debug(f"Navegando a: {url_busqueda}")
 
-        for item in items[:self.cantidad_max]:
-            registro = self._parsear_resultado_html(item)
-            if registro:
-                registros.append(registro)
+                try:
+                    pagina.goto(url_busqueda, wait_until="networkidle", timeout=60000)
 
-        return registros
+                    time.sleep(5)
 
-    def _parsear_resultado_html(self, item) -> dict | None:
-        """Parsea un ítem HTML de resultado de Primo VE."""
-        titulo_el = item.select_one("h3.item-title a, .item-title")
-        titulo    = titulo_el.get_text(strip=True) if titulo_el else ""
+                    try:
+                        pagina.wait_for_selector(
+                            ".item-title, .result-item-text, "
+                            "prm-brief-result-container .item-title, "
+                            "h3.item-title, [class*='result'] a",
+                            timeout=10000,
+                            state="visible"
+                        )
+                    except Exception:
+                        logger.debug("No se detectaron titulos de resultado visibles.")
 
-        autor_el = item.select_one(".item-detail-element:first-child")
-        autor    = autor_el.get_text(strip=True) if autor_el else ""
+                    sin_resultados = pagina.query_selector(".no-results, .zero-results")
+                    if sin_resultados:
+                        logger.info("No se encontraron mas resultados.")
+                        break
 
-        year_el = item.select_one("[title*='Publication Year']")
-        anio    = year_el.get_text(strip=True) if year_el else ""
+                    documentos_pagina = self._extraer_resultados(pagina)
 
-        link_el = item.select_one("a[href*='fulldisplay']")
-        url_pagina = BASE_URL + link_el["href"] if link_el and link_el.get("href") else ""
+                    if not documentos_pagina:
+                        logger.info(f"No se pudieron extraer resultados en offset={offset}.")
+                        break
 
-        pdf_el  = item.select_one("a[href$='.pdf'], a[href*='/media/']")
-        url_pdf = pdf_el["href"] if pdf_el and pdf_el.get("href") else ""
+                    for doc in documentos_pagina:
+                        if documentos_obtenidos >= filtros.limite:
+                            break
 
-        if not titulo:
-            return None
+                        if doc.url_fuente:
+                            urls_pdf = self._obtener_url_pdf(pagina, doc.url_fuente)
+                            doc.urls_descarga = urls_pdf
 
-        return {
-            "record_id" : "",
-            "titulo"    : titulo,
-            "autor"     : autor,
-            "anio"      : anio,
-            "idioma"    : "",
-            "tipo"      : "",
-            "url_pdf"   : url_pdf,
-            "url_pagina": url_pagina,
-        }
+                        resultados.append(doc)
+                        documentos_obtenidos += 1
 
-    # Descarga de PDF
-    def _descargar_documento(self, registro: dict, keyword: str) -> dict | None:
-        """Descarga el PDF y lo guarda localmente."""
-        url_pdf = registro.get("url_pdf")
+                    logger.info(f"Pagina offset={offset}: {len(documentos_pagina)} resultados "
+                                f"(total: {documentos_obtenidos}/{filtros.limite})")
 
-        # Si no hay URL directa, intentar obtenerla desde la página
-        if not url_pdf and registro.get("url_pagina"):
-            url_pdf = self._extraer_pdf_de_pagina(registro["url_pagina"])
+                    if len(documentos_pagina) < self.RESULTADOS_POR_PAGINA:
+                        break
 
-        if not url_pdf:
-            return None
+                    offset += self.RESULTADOS_POR_PAGINA
+                    time.sleep(2)
 
-        titulo_corto = sanitizar_nombre(registro.get("titulo", "sin_titulo"), max_len=50)
-        anio         = registro.get("anio", "")
-        record_id    = registro.get("record_id", "unk")
-        nombre_pdf   = f"ILO_{record_id}_{titulo_corto}_{anio}.pdf".replace(" ", "_")
+                except Exception as e:
+                    logger.error(f"Error al procesar pagina offset={offset}: {e}", exc_info=True)
+                    break
 
-        dir_temp  = obtener_dir_temporal()
-        dir_tema  = dir_temp / sanitizar_nombre(keyword)
-        dir_tema.mkdir(parents=True, exist_ok=True)
-        ruta_dest = dir_tema / nombre_pdf
+            navegador.close()
 
-        if not ruta_dest.exists():
-            try:
-                resp = self.session.get(url_pdf, timeout=TIMEOUT, stream=True)
-                resp.raise_for_status()
+        resultados = resultados[:filtros.limite]
+        logger.info(f"Busqueda completada. Total de documentos encontrados: {len(resultados)}")
+        return resultados
 
-                content_type = resp.headers.get("Content-Type", "")
-                if "pdf" not in content_type.lower() and "octet-stream" not in content_type.lower():
-                    if not url_pdf.lower().endswith(".pdf"):
-                        return None
+    def _construir_url_busqueda(self, query: str, filtros: FiltrosBusqueda, offset: int) -> str:
+        query_primo = f"any,contains,{query}"
 
-                with open(ruta_dest, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
+        url = (
+            f"{BASE_URL}/discovery/search?"
+            f"query={query_primo}"
+            f"&tab={TAB}"
+            f"&search_scope={SEARCH_SCOPE}"
+            f"&vid={VID}"
+            f"&offset={offset}"
+            f"&lang=en"
+        )
 
-                if ruta_dest.stat().st_size < 1024:
-                    ruta_dest.unlink()
-                    return None
+        if filtros.idioma:
+            for codigo_idioma in filtros.idioma:
+                if codigo_idioma in MAPA_IDIOMAS_ILO:
+                    codigo = MAPA_IDIOMAS_ILO[codigo_idioma]
+                    url += f"&mfacet=lang,include,{codigo},1"
 
-            except requests.RequestException:
-                return None
+        if filtros.tipo_documento:
+            clave_tipo = filtros.tipo_documento.lower()
+            tipo_primo = MAPA_TIPOS_ILO.get(clave_tipo, "")
+            if tipo_primo:
+                url += f"&mfacet=rtype,include,{tipo_primo},1"
 
-        return {
-            "fuente"        : "Labordoc_ILO",
-            "tema"          : keyword,
-            "record_id"     : registro.get("record_id", ""),
-            "titulo"        : registro.get("titulo", ""),
-            "autor"         : registro.get("autor", ""),
-            "anio"          : registro.get("anio", ""),
-            "idioma"        : registro.get("idioma", ""),
-            "url_pdf"       : url_pdf,
-            "url_pagina"    : registro.get("url_pagina", ""),
-            "archivo_local" : str(ruta_dest),
-        }
+        if filtros.anio_desde or filtros.anio_hasta:
+            desde = filtros.anio_desde or 1900
+            hasta = filtros.anio_hasta or 2030
+            url += f"&facet=searchcreationdate,include,[{desde}+TO+{hasta}]"
 
-    def _extraer_pdf_de_pagina(self, url_pagina: str) -> str | None:
-        """Navega la página del documento y busca el link de PDF."""
-        if not url_pagina:
-            return None
+        return url
+
+    def _extraer_resultados(self, pagina) -> List[DocumentoResultado]:
+        documentos = []
+        html = pagina.content()
+
+        import html as html_module
+        html_decoded = html_module.unescape(html)
+
+        enlaces_fulldisplay = re.findall(
+            r'(/discovery/fulldisplay\?[^"\'>\s]+)',
+            html_decoded
+        )
+
+        docids_vistos = set()
+        enlaces_unicos = []
+        for href in enlaces_fulldisplay:
+            match_docid = re.search(r'docid=([^&\s]+)', href)
+            if match_docid:
+                docid = match_docid.group(1)
+                if docid not in docids_vistos:
+                    docids_vistos.add(docid)
+                    enlaces_unicos.append((href, docid))
+
+        logger.debug(f"Enlaces a registros encontrados: {len(enlaces_unicos)}")
+
+        titulos_playwright = []
         try:
-            from bs4 import BeautifulSoup
-            resp = self.session.get(url_pagina, timeout=TIMEOUT)
-            soup = BeautifulSoup(resp.text, "lxml")
-
-            # Buscar links directos a PDF
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if ".pdf" in href.lower():
-                    return href if href.startswith("http") else BASE_URL + href
-
-            # Buscar en los atributos de datos o scripts
-            for script in soup.find_all("script"):
-                if script.string and ".pdf" in script.string:
-                    match = re.search(r'https?://[^\s"\']+\.pdf', script.string)
-                    if match:
-                        return match.group()
-
+            elementos_titulo = pagina.query_selector_all(
+                ".item-title a, "
+                "h3.item-title a, "
+                "prm-brief-result-container .item-title a, "
+                "[class*='result'] .item-title a"
+            )
+            for elem in elementos_titulo:
+                try:
+                    texto = elem.inner_text().strip()
+                    if texto and len(texto) > 3:
+                        titulos_playwright.append(texto)
+                except Exception:
+                    continue
         except Exception:
             pass
+
+        for i, (href, docid) in enumerate(enlaces_unicos):
+            try:
+                doc = DocumentoResultado()
+                doc.recid = docid
+
+                if i < len(titulos_playwright):
+                    doc.titulo = titulos_playwright[i]
+                else:
+                    doc.titulo = f"Documento ILO {docid}"
+
+                href_limpio = href.replace("&amp;", "&")
+                if href_limpio.startswith("/"):
+                    doc.url_fuente = f"{BASE_URL}{href_limpio}"
+                else:
+                    doc.url_fuente = href_limpio
+
+                documentos.append(doc)
+
+            except Exception as e:
+                logger.warning(f"Error al extraer resultado: {e}", exc_info=True)
+
+        return documentos
+
+    def _obtener_url_pdf(self, pagina, url_registro: str) -> List[str]:
+
+        urls_pdf = []
+
+        try:
+
+            import html as html_module
+            url_limpia = html_module.unescape(url_registro)
+
+            pagina.goto(url_limpia, wait_until="networkidle", timeout=45000)
+
+            time.sleep(6)
+
+            html_contenido = pagina.content()
+            html_decodificado = html_module.unescape(html_contenido)
+
+            urls_ilo_media = re.findall(
+                r'https?://[^"\'<>\s]*ilo\.org/media/\d+/download',
+                html_decodificado
+            )
+            urls_pdf.extend(urls_ilo_media)
+
+            urls_directas_pdf = re.findall(
+                r'https?://[^"\'<>\s]+\.pdf(?:\?[^"\'<>\s]*)?',
+                html_decodificado
+            )
+            urls_pdf.extend(urls_directas_pdf)
+
+            urls_delivery = re.findall(
+                r'https?://[^"\'<>\s]*labordoc[^"\'<>\s]*/delivery/[^"\'<>\s]+',
+                html_decodificado
+            )
+            urls_pdf.extend(urls_delivery)
+
+            if not urls_pdf:
+                try:
+                    enlaces = pagina.query_selector_all("a[href]")
+                    for enlace in enlaces:
+                        try:
+                            href = enlace.get_attribute("href") or ""
+                            texto = (enlace.inner_text() or "").strip().lower()
+
+                            es_descarga = (
+                                "/download" in href.lower() or
+                                href.lower().endswith(".pdf") or
+                                "/delivery/" in href.lower() or
+                                "pdf" in texto or
+                                "full text" in texto or
+                                "view online" in texto or
+                                "online access" in texto or
+                                "texto completo" in texto
+                            )
+
+                            if es_descarga and href.startswith("http"):
+                                if "javascript:" not in href:
+                                    urls_pdf.append(href)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+            urls_unicas = list(dict.fromkeys(urls_pdf))
+
+            urls_filtradas = [
+                u for u in urls_unicas
+                if not any(excl in u.lower() for excl in [
+                    '/thumbnail/',      
+                    'ignoredefault',     
+                    '.css', '.js', '.png', '.jpg', '.gif', '.svg',
+                    'google.com', 'facebook.com', 'twitter.com',
+                    'analytics', 'tracking',
+                ])
+            ]
+
+            urls_prioritarias = [u for u in urls_filtradas
+                                 if '/view/delivery/' in u or '/media/' in u]
+            urls_resto = [u for u in urls_filtradas if u not in urls_prioritarias]
+            urls_pdf = urls_prioritarias + urls_resto
+
+        except Exception as e:
+            logger.warning(f"Error al obtener URL de PDF desde {url_registro}: {e}")
+
+        logger.debug(f"URLs de PDF encontradas para {url_registro}: {len(urls_pdf)}")
+        return urls_pdf[:5]
+
+    def download(self, documento: DocumentoResultado, carpeta_destino: str,
+                 intentos_max: int = 3) -> Optional[str]:
+        if not documento.urls_descarga:
+            logger.warning(f"No se encontraron archivos descargables para: {documento.titulo}")
+            return None
+
+        nombre_base = self._nombre_archivo_seguro(documento)
+
+        for url in documento.urls_descarga:
+            ruta_archivo = os.path.join(carpeta_destino, nombre_base)
+
+            for intento in range(1, intentos_max + 1):
+                try:
+                    logger.debug(f"Intento {intento}/{intentos_max} descargando: {url}")
+                    respuesta = requests.get(
+                        url,
+                        timeout=120,
+                        stream=True,
+                        allow_redirects=True,
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                          "Chrome/120.0.0.0 Safari/537.36"
+                        }
+                    )
+                    respuesta.raise_for_status()
+
+                    content_type = respuesta.headers.get("Content-Type", "")
+                    if "pdf" not in content_type.lower() and "octet-stream" not in content_type.lower():
+                        logger.debug(f"Content-Type no es PDF: {content_type}. Probando siguiente URL.")
+                        break
+
+                    with open(ruta_archivo, "wb") as f:
+                        for bloque in respuesta.iter_content(chunk_size=8192):
+                            f.write(bloque)
+
+                    tamano = os.path.getsize(ruta_archivo)
+                    if tamano < 100:
+                        logger.warning(f"Archivo demasiado pequeno ({tamano} bytes).")
+                        os.remove(ruta_archivo)
+                        continue
+
+                    logger.debug(f"Descarga exitosa: {ruta_archivo} ({tamano:,} bytes)")
+                    return ruta_archivo
+
+                except requests.RequestException as e:
+                    logger.warning(f"Intento {intento}/{intentos_max} fallido para {url}: {e}")
+                    if intento < intentos_max:
+                        time.sleep(2 * intento)
+
+            logger.error(f"Descarga fallida despues de {intentos_max} intentos: {url}")
+
         return None
+
+    def _nombre_archivo_seguro(self, documento: DocumentoResultado) -> str:
+        nombre = documento.titulo[:80] if documento.titulo else "sin_titulo"
+        nombre = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', nombre)
+        nombre = re.sub(r'\s+', '_', nombre)
+        nombre = nombre.strip('_.')
+
+        if documento.recid:
+            recid_corto = documento.recid[:30]
+            nombre = f"ILO_{recid_corto}_{nombre}"
+        else:
+            nombre = f"ILO_{nombre}"
+
+        if not nombre.lower().endswith(".pdf"):
+            nombre += ".pdf"
+
+        return nombre

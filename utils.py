@@ -1,7 +1,3 @@
-"""
-utils.py — Funciones de utilidad compartidas para el scraper de documentos.
-"""
-
 import os
 import re
 import zipfile
@@ -111,24 +107,12 @@ def obtener_dir_temporal() -> Path:
 
 
 def crear_archivo_comprimido(resultados: list[dict], palabras_clave: list[str]) -> str:
-    """
-    Organiza los archivos descargados en carpetas por tema y los comprime.
-    Estructura dentro del ZIP:
-        ├── climate_change/
-        │   ├── UN_Digital_Library/
-        │   │   └── documento.pdf
-        │   └── Labordoc_ILO/
-        │       └── documento.pdf
-        └── human_rights/
-            └── ...
-    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     nombre_zip = f"documentos_{timestamp}.zip"
 
     print(f"\n{Fore.CYAN}📦 Creando archivo comprimido: {Fore.YELLOW}{nombre_zip}")
 
     with zipfile.ZipFile(nombre_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Agrupar por tema y fuente
         for resultado in tqdm(resultados, desc="  Comprimiendo", unit="archivo",
                               bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}"):
             if not resultado.get("archivo_local"):
@@ -145,7 +129,6 @@ def crear_archivo_comprimido(resultados: list[dict], palabras_clave: list[str]) 
             ruta_en_zip = f"{tema_dir}/{fuente_dir}/{nombre_pdf}"
             zf.write(ruta_archivo, ruta_en_zip)
 
-        # Agregar un índice CSV con metadatos
         indice_csv = _generar_indice_csv(resultados)
         zf.writestr("_indice_documentos.csv", indice_csv)
 
@@ -154,7 +137,6 @@ def crear_archivo_comprimido(resultados: list[dict], palabras_clave: list[str]) 
 
 
 def _generar_indice_csv(resultados: list[dict]) -> str:
-    """Genera un CSV con el índice de todos los documentos descargados."""
     lineas = ["TEMA,FUENTE,TÍTULO,AUTOR,AÑO,IDIOMA,URL_ORIGINAL,ARCHIVO"]
     for r in resultados:
         if not r.get("archivo_local"):
@@ -174,7 +156,6 @@ def _generar_indice_csv(resultados: list[dict]) -> str:
 
 
 def imprimir_resumen(resultados: list[dict], archivo_zip: str):
-    """Imprime el resumen final de la operación."""
     total     = len(resultados)
     exitosos  = sum(1 for r in resultados if r.get("archivo_local"))
     fallidos  = total - exitosos
@@ -190,11 +171,11 @@ def imprimir_resumen(resultados: list[dict], archivo_zip: str):
 ╔══════════════════════════════════════════════════════╗
 ║                   RESUMEN FINAL                      ║
 ╚══════════════════════════════════════════════════════╝{Style.RESET_ALL}
-  📄 Documentos encontrados : {Fore.WHITE}{total}
+  Documentos encontrados : {Fore.WHITE}{total}
   {Fore.GREEN}✔  Descargados con éxito  : {exitosos}
   {Fore.RED}✘  Fallidos / sin PDF     : {fallidos}{Style.RESET_ALL}
 
-  📁 Documentos por tema:""")
+  Documentos por tema:""")
 
     for tema, cantidad in temas.items():
         print(f"     • {Fore.YELLOW}{tema:<40}{Style.RESET_ALL} → {cantidad} archivo(s)")
@@ -205,7 +186,6 @@ def imprimir_resumen(resultados: list[dict], archivo_zip: str):
 
 
 def limpiar_directorio_temporal():
-    """Elimina el directorio temporal de trabajo."""
     if DIR_TEMP.exists():
         shutil.rmtree(DIR_TEMP)
         print(f"{Fore.WHITE}  🧹 Archivos temporales eliminados.{Style.RESET_ALL}")

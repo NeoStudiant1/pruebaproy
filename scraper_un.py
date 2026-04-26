@@ -1,304 +1,317 @@
-"""
-scraper_un.py — Scraper para la UN Digital Library (digitallibrary.un.org).
-
-Estrategia:
-  - Usa la API pública de Invenio con output format MARCXML (of=xm)
-  - Parsea los registros MARC para extraer metadatos y links a PDFs (campo 856)
-  - Descarga los PDFs directamente con requests
-  - Paginación automática mediante jrec + rg
-"""
-
+# -*- coding: utf-8 -*-
+import os
 import re
 import time
-from pathlib import Path
-from xml.etree import ElementTree as ET
-
+import logging
 import requests
-from tqdm import tqdm
-from colorama import Fore, Style
+from typing import List, Optional
+from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
 
-from utils import sanitizar_nombre, obtener_dir_temporal
+logger = logging.getLogger(__name__)
 
-# Constantes
-BASE_URL     = "https://digitallibrary.un.org"
-SEARCH_URL   = f"{BASE_URL}/search"
-REGISTROS_POR_PAGINA = 25      # máximo seguro para Invenio
-TIMEOUT      = 30              # segundos por request
-HEADERS      = {
-    "User-Agent": (
-        "Mozilla/5.0 (compatible; DocumentScraper/1.0; "
-        "+https://github.com/usuario/scraper)"
-    )
+MAPA_IDIOMAS = {
+    "es": "ES",
+    "en": "EN",
+    "fr": "FR",
+    "ar": "AR",
+    "zh": "ZH",
+    "ru": "RU",
+}
+
+MAPA_TIPOS_DOCUMENTO = {
+    "reporte": "report",
+    "resolucion": "resolution",
+    "acuerdo": "agreement",
+    "decision": "decision",
+    "carta": "letter",
+}
+
+BASE_URL = "https://digitallibrary.un.org"
+
+HEADERS_DESCARGA = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
 
 
-class ScraperUN:
-    """
-    Scraper para UN Digital Library usando la API Invenio (MARCXML).
-    """
+class UNDigitalLibraryScraper(BaseScraper):
 
-    def __init__(self, palabras_clave: list[str], cantidad_max: int):
-        self.palabras_clave = palabras_clave
-        self.cantidad_max   = cantidad_max
-        self.session        = requests.Session()
-        self.session.headers.update(HEADERS)
+    REGISTROS_POR_PAGINA = 50
 
-    # Punto de entrada
-    def ejecutar(self) -> list[dict]:
-        """Busca y descarga documentos para todas las palabras clave."""
-        resultados_totales = []
+    def nombre_fuente(self) -> str:
+        return "UN Digital Library"
 
-        for keyword in self.palabras_clave:
-            print(f"\n  {Fore.BLUE}🔍 UN Library — buscando: {Fore.YELLOW}{keyword}{Style.RESET_ALL}")
-            registros = self._buscar(keyword)
+    def search(self, filtros: FiltrosBusqueda) -> List[DocumentoResultado]:
+        query = " ".join(filtros.palabras_clave) if filtros.palabras_clave else ""
+        if not query:
+            logger.error("No se proporcionaron palabras clave para la busqueda.")
+            return []
 
-            if not registros:
-                print(f"  {Fore.RED}  ✘ Sin resultados para '{keyword}' en UN Library.")
-                continue
+        logger.info(f"Iniciando busqueda en UN Digital Library: '{query}'")
+        logger.info(f"Limite configurado: {filtros.limite} documentos")
 
-            print(f"  {Fore.CYAN}  → {len(registros)} documento(s) encontrados. Descargando...")
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            logger.error(
+                "Playwright no esta instalado. Ejecuta:\n"
+                "  pip install playwright\n"
+                "  playwright install chromium"
+            )
+            return []
 
-            for registro in tqdm(registros, desc=f"    Descargando", unit="doc",
-                                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}"):
-                resultado = self._descargar_documento(registro, keyword)
-                if resultado:
-                    resultados_totales.append(resultado)
-                time.sleep(0.8)  # cortesía al servidor
+        resultados = []
 
-        return resultados_totales
+        with sync_playwright() as pw:
+            navegador = pw.chromium.launch(headless=True)
+            contexto = navegador.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 900}
+            )
+            pagina = contexto.new_page()
+            pagina.set_default_timeout(45000)
 
-    # Búsqueda con paginación
-    def _buscar(self, keyword: str) -> list[dict]:
-        """
-        Llama a la API MARCXML de Invenio y pagina hasta obtener
-        cantidad_max registros (o los que haya disponibles).
-        """
-        registros      = []
-        jrec           = 1
-        obtenidos      = 0
-        total_servidor = None
+            record_ids = self._buscar_record_ids(pagina, query, filtros)
 
-        while obtenidos < self.cantidad_max:
-            por_pagina = min(REGISTROS_POR_PAGINA, self.cantidad_max - obtenidos)
+            if not record_ids:
+                logger.info("No se encontraron resultados en la busqueda.")
+                navegador.close()
+                return []
 
-            params = {
-                "p"    : keyword,
-                "of"   : "xm",          # MARCXML
-                "rg"   : por_pagina,
-                "jrec" : jrec,
-                "c"    : "Documents and Publications",
-                "ln"   : "en",
-            }
+            logger.info(f"Se encontraron {len(record_ids)} record IDs.")
 
-            try:
-                resp = self.session.get(SEARCH_URL, params=params, timeout=TIMEOUT)
-                resp.raise_for_status()
-            except requests.RequestException as e:
-                print(f"\n  {Fore.RED}  ✘ Error al consultar UN Library: {e}{Style.RESET_ALL}")
-                break
-
-            # Leer total de resultados desde comentario HTML
-            if total_servidor is None:
-                match = re.search(
-                    r"Search-Engine-Total-Number-Of-Results:\s*(\d+)",
-                    resp.text
-                )
-                total_servidor = int(match.group(1)) if match else 0
-                if total_servidor == 0:
+            for i, recid in enumerate(record_ids):
+                if len(resultados) >= filtros.limite:
                     break
 
-            lote = self._parsear_marcxml(resp.text)
-            if not lote:
-                break
+                logger.debug(f"Extrayendo metadatos del registro {recid} "
+                            f"({i+1}/{len(record_ids)})")
 
-            registros.extend(lote)
-            obtenidos += len(lote)
-            jrec      += len(lote)
+                try:
+                    doc = self._extraer_metadatos_registro(pagina, recid, filtros)
+                    if doc:
+                        resultados.append(doc)
+                except Exception as e:
+                    logger.warning(f"Error al extraer metadatos del registro {recid}: {e}",
+                                  exc_info=True)
 
-            if jrec > total_servidor:
-                break
+                if i < len(record_ids) - 1:
+                    time.sleep(1.0)
 
-            time.sleep(1)
+            navegador.close()
 
-        return registros[:self.cantidad_max]
+        logger.info(f"Busqueda completada. Total de documentos: {len(resultados)}")
+        return resultados
 
-    # Parser MARCXML
-    def _parsear_marcxml(self, xml_text: str) -> list[dict]:
-        """
-        Extrae de cada <record> MARC los campos relevantes:
-          - 001       → recid
-          - 041 $a    → idioma
-          - 100/700 $a→ autor
-          - 245 $a    → título
-          - 260/269 $c→ año
-          - 520 $a    → resumen
-          - 856 $u    → URL del PDF
-        """
-        # El MARCXML puede venir con comentario HTML antes; limpiar
-        inicio = xml_text.find("<collection>")
-        if inicio == -1:
-            return []
-        xml_limpio = xml_text[inicio:]
+    def _buscar_record_ids(self, pagina, query: str,
+                            filtros: FiltrosBusqueda) -> List[str]:
+        record_ids = []
+        pagina_num = 1
+        ids_necesarios = filtros.limite
 
-        try:
-            root = ET.fromstring(xml_limpio)
-        except ET.ParseError:
-            return []
+        query_final = query
+        if filtros.tipo_documento:
+            clave_tipo = filtros.tipo_documento.lower()
+            tipo_en = MAPA_TIPOS_DOCUMENTO.get(clave_tipo, filtros.tipo_documento)
+            query_final = f"{query} {tipo_en}"
 
-        ns = ""  # Invenio no usa namespace
-        registros = []
+        while len(record_ids) < ids_necesarios:
+            jrec = ((pagina_num - 1) * self.REGISTROS_POR_PAGINA) + 1
+            rg = min(self.REGISTROS_POR_PAGINA, ids_necesarios - len(record_ids))
 
-        for record in root.findall("record"):
-            datos = {
-                "recid"    : "",
-                "titulo"   : "",
-                "autor"    : "",
-                "anio"     : "",
-                "idioma"   : "",
-                "resumen"  : "",
-                "url_pdf"  : "",
-                "url_pagina": "",
-            }
+            url = (
+                f"{BASE_URL}/search?ln=en"
+                f"&p={query_final}"
+                f"&action_search=Search"
+                f"&c=Documents+and+Publications"
+                f"&sf=year&so=d"
+                f"&rg={rg}&jrec={jrec}"
+                f"&of=hb"
+            )
 
-            # Campo de control 001 → recid
-            ctrl = record.find("controlfield[@tag='001']")
-            if ctrl is not None:
-                datos["recid"] = ctrl.text or ""
-                datos["url_pagina"] = f"{BASE_URL}/record/{datos['recid']}"
+            if filtros.anio_desde:
+                url += f"&d1y={filtros.anio_desde}&d1m=01&d1d=01"
+            if filtros.anio_hasta:
+                url += f"&d2y={filtros.anio_hasta}&d2m=12&d2d=31"
+            if filtros.anio_desde or filtros.anio_hasta:
+                url += "&dt=c"
 
-            for df in record.findall("datafield"):
-                tag = df.get("tag", "")
-
-                # Idioma
-                if tag == "041":
-                    sf = df.find("subfield[@code='a']")
-                    if sf is not None:
-                        datos["idioma"] = (sf.text or "").upper()
-
-                # Autor principal
-                elif tag == "100":
-                    sf = df.find("subfield[@code='a']")
-                    if sf is not None and not datos["autor"]:
-                        datos["autor"] = sf.text or ""
-
-                # Autores secundarios
-                elif tag == "700":
-                    sf = df.find("subfield[@code='a']")
-                    if sf is not None and not datos["autor"]:
-                        datos["autor"] = sf.text or ""
-
-                # Título
-                elif tag == "245":
-                    sf = df.find("subfield[@code='a']")
-                    if sf is not None:
-                        datos["titulo"] = (sf.text or "").rstrip(" /")
-
-                # Año de publicación
-                elif tag in ("260", "269", "264"):
-                    sf = df.find("subfield[@code='c']")
-                    if sf is not None and not datos["anio"]:
-                        anio_match = re.search(r"\b(19|20)\d{2}\b", sf.text or "")
-                        if anio_match:
-                            datos["anio"] = anio_match.group()
-
-                # Resumen
-                elif tag == "520":
-                    sf = df.find("subfield[@code='a']")
-                    if sf is not None and not datos["resumen"]:
-                        datos["resumen"] = (sf.text or "")[:300]
-
-                # URL del archivo (priorizar PDF)
-                elif tag == "856":
-                    sf_url  = df.find("subfield[@code='u']")
-                    sf_tipo = df.find("subfield[@code='q']")
-                    if sf_url is not None:
-                        url = sf_url.text or ""
-                        tipo = (sf_tipo.text or "").lower() if sf_tipo is not None else ""
-                        # Priorizar PDF
-                        if "pdf" in url.lower() or "pdf" in tipo:
-                            datos["url_pdf"] = url
-                        elif not datos["url_pdf"] and url:
-                            datos["url_pdf"] = url  # guardar lo que haya
-
-            if datos["recid"]:
-                registros.append(datos)
-
-        return registros
-
-    # Descarga de PDF
-    def _descargar_documento(self, registro: dict, keyword: str) -> dict | None:
-        """Descarga el PDF de un registro y lo guarda en el directorio temporal."""
-        url_pdf = registro.get("url_pdf")
-        if not url_pdf:
-            return None  # No hay PDF disponible
-
-        # Construir nombre de archivo
-        titulo_corto = sanitizar_nombre(registro.get("titulo", "sin_titulo"), max_len=50)
-        anio         = registro.get("anio", "")
-        nombre_pdf   = f"UN_{registro['recid']}_{titulo_corto}_{anio}.pdf".replace(" ", "_")
-
-        # Carpeta destino: _temp_documentos/{keyword}/{fuente}/
-        dir_temp  = obtener_dir_temporal()
-        dir_tema  = dir_temp / sanitizar_nombre(keyword)
-        dir_tema.mkdir(parents=True, exist_ok=True)
-        ruta_dest = dir_tema / nombre_pdf
-
-        # Descargar si no existe ya
-        if not ruta_dest.exists():
             try:
-                resp = self.session.get(url_pdf, timeout=TIMEOUT, stream=True)
-                resp.raise_for_status()
+                logger.debug(f"Navegando a busqueda pagina {pagina_num}: {url}")
+                pagina.goto(url, wait_until="domcontentloaded")
 
-                # Verificar que sea PDF
-                content_type = resp.headers.get("Content-Type", "")
-                if "pdf" not in content_type.lower() and not url_pdf.lower().endswith(".pdf"):
-                    # Intentar recuperar desde página del record
-                    url_pdf_alt = self._buscar_pdf_en_pagina(registro.get("url_pagina", ""))
-                    if url_pdf_alt:
-                        resp = self.session.get(url_pdf_alt, timeout=TIMEOUT, stream=True)
-                        resp.raise_for_status()
-                    else:
-                        return None
+                time.sleep(3)
 
-                with open(ruta_dest, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                contenido = pagina.content()
+                ids_pagina = re.findall(r'/record/(\d+)', contenido)
 
-                # Verificar que el archivo no esté vacío
-                if ruta_dest.stat().st_size < 1024:
-                    ruta_dest.unlink()
-                    return None
+                ids_unicos = []
+                ids_vistos = set(record_ids)
+                for rid in ids_pagina:
+                    if rid not in ids_vistos and rid not in ids_unicos:
+                        ids_unicos.append(rid)
+                        ids_vistos.add(rid)
 
-            except requests.RequestException:
-                return None
+                if not ids_unicos:
+                    logger.debug(f"No se encontraron nuevos IDs en pagina {pagina_num}.")
+                    break
 
-        return {
-            "fuente"        : "UN_Digital_Library",
-            "tema"          : keyword,
-            "recid"         : registro["recid"],
-            "titulo"        : registro.get("titulo", ""),
-            "autor"         : registro.get("autor", ""),
-            "anio"          : registro.get("anio", ""),
-            "idioma"        : registro.get("idioma", ""),
-            "url_pdf"       : url_pdf,
-            "url_pagina"    : registro.get("url_pagina", ""),
-            "archivo_local" : str(ruta_dest),
-        }
+                record_ids.extend(ids_unicos)
+                logger.debug(f"Pagina {pagina_num}: {len(ids_unicos)} IDs "
+                            f"(total: {len(record_ids)})")
 
-    def _buscar_pdf_en_pagina(self, url_pagina: str) -> str | None:
-        """
-        Fallback: navega la página HTML del registro y busca links a PDF.
-        """
-        if not url_pagina:
-            return None
+                if len(ids_unicos) < 5:
+                    break
+
+                pagina_num += 1
+                time.sleep(1.5)
+
+            except Exception as e:
+                logger.error(f"Error en busqueda pagina {pagina_num}: {e}", exc_info=True)
+                break
+
+        return record_ids[:ids_necesarios]
+
+    def _extraer_metadatos_registro(self, pagina, recid: str,
+                                     filtros: FiltrosBusqueda) -> Optional[DocumentoResultado]:
+        url = f"{BASE_URL}/record/{recid}"
+
         try:
-            from bs4 import BeautifulSoup
-            resp = self.session.get(url_pagina, timeout=TIMEOUT)
-            soup = BeautifulSoup(resp.text, "lxml")
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if ".pdf" in href.lower():
-                    return href if href.startswith("http") else BASE_URL + href
-        except Exception:
-            pass
+            pagina.goto(url, wait_until="domcontentloaded")
+            time.sleep(2)
+        except Exception as e:
+            logger.warning(f"Error al navegar al registro {recid}: {e}")
+            return None
+
+        html = pagina.content()
+        doc = DocumentoResultado()
+        doc.recid = recid
+        doc.url_fuente = url
+
+        match_titulo = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
+        if match_titulo:
+            titulo = re.sub(r'<[^>]+>', '', match_titulo.group(1)).strip()
+            doc.titulo = titulo
+        else:
+            doc.titulo = f"Documento UN {recid}"
+
+        seccion_autores = re.search(
+            r'Authors\s*</[^>]+>\s*(.*?)(?:</(?:div|td|tr)|<(?:div|td|tr)\s)',
+            html, re.DOTALL | re.IGNORECASE
+        )
+        if seccion_autores:
+            autores = re.findall(r'>([^<]+)</a>', seccion_autores.group(1))
+            doc.autor = "; ".join(a.strip() for a in autores if a.strip())
+
+        match_fecha = re.search(
+            r'Date\s*</[^>]+>\s*[^<]*?(\d{4})',
+            html, re.DOTALL | re.IGNORECASE
+        )
+        if match_fecha:
+            doc.anio = match_fecha.group(1)
+
+        urls_relativas = re.findall(
+            rf'/record/{re.escape(recid)}/files/[^\s"\'<>]+\.pdf',
+            html
+        )
+        urls_pdf = list(set(f"{BASE_URL}{u}" for u in urls_relativas))
+
+        if filtros.idioma:
+            sufijos = [MAPA_IDIOMAS[c] for c in filtros.idioma if c in MAPA_IDIOMAS]
+            if sufijos:
+                urls_filtradas = [u for u in urls_pdf
+                                if any(f"-{s}." in u.upper() or f"-{s}" in u.upper()
+                                       for s in sufijos)]
+                if urls_filtradas:
+                    urls_pdf = urls_filtradas
+
+        doc.urls_descarga = urls_pdf
+
+        if doc.urls_descarga:
+            primer_pdf = doc.urls_descarga[0].upper()
+            for codigo, sufijo in MAPA_IDIOMAS.items():
+                if f"-{sufijo}." in primer_pdf or f"-{sufijo}" in primer_pdf:
+                    doc.idioma = codigo
+                    break
+
+        titulo_lower = doc.titulo.lower()
+        for palabra, tipo in [
+            ("resolution", "Resolution"),
+            ("report", "Report"),
+            ("decision", "Decision"),
+            ("agreement", "Agreement"),
+            ("letter", "Letter"),
+            ("note", "Note"),
+        ]:
+            if palabra in titulo_lower:
+                doc.tipo_documento = tipo
+                break
+
+        return doc
+
+    def download(self, documento: DocumentoResultado, carpeta_destino: str,
+                 intentos_max: int = 3) -> Optional[str]:
+        if not documento.urls_descarga:
+            logger.warning(f"No se encontraron archivos descargables para: {documento.titulo}")
+            return None
+
+        nombre_base = self._nombre_archivo_seguro(documento)
+        ruta_archivo = os.path.join(carpeta_destino, nombre_base)
+
+        for url in documento.urls_descarga:
+            for intento in range(1, intentos_max + 1):
+                try:
+                    logger.debug(f"Intento {intento}/{intentos_max} descargando: {url}")
+                    respuesta = requests.get(
+                        url,
+                        timeout=120,
+                        stream=True,
+                        headers=HEADERS_DESCARGA
+                    )
+                    respuesta.raise_for_status()
+
+                    content_type = respuesta.headers.get("Content-Type", "")
+                    if ("pdf" not in content_type.lower()
+                            and "octet-stream" not in content_type.lower()):
+                        logger.warning(f"No es PDF (Content-Type: {content_type}). "
+                                      "Probando siguiente URL.")
+                        break
+
+                    with open(ruta_archivo, "wb") as f:
+                        for bloque in respuesta.iter_content(chunk_size=8192):
+                            f.write(bloque)
+
+                    tamano = os.path.getsize(ruta_archivo)
+                    if tamano < 100:
+                        logger.warning(f"Archivo muy pequeno ({tamano} bytes).")
+                        os.remove(ruta_archivo)
+                        continue
+
+                    logger.debug(f"Descarga exitosa: {ruta_archivo} ({tamano:,} bytes)")
+                    return ruta_archivo
+
+                except requests.RequestException as e:
+                    logger.warning(f"Intento {intento}/{intentos_max} fallido: {e}")
+                    if intento < intentos_max:
+                        time.sleep(2 * intento)
+
+            logger.error(f"Descarga fallida tras {intentos_max} intentos: {url}")
+
         return None
+
+    def _nombre_archivo_seguro(self, documento: DocumentoResultado) -> str:
+        nombre = documento.titulo[:80] if documento.titulo else "sin_titulo"
+        nombre = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', nombre)
+        nombre = re.sub(r'\s+', '_', nombre)
+        nombre = nombre.strip('_.')
+
+        if documento.recid:
+            nombre = f"UN_{documento.recid}_{nombre}"
+        else:
+            nombre = f"UN_{nombre}"
+
+        if not nombre.lower().endswith(".pdf"):
+            nombre += ".pdf"
+
+        return nombre
