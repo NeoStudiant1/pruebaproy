@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 import os
 import re
 import time
@@ -35,6 +36,7 @@ HEADERS_DESCARGA = {
 
 
 class UNDigitalLibraryScraper(BaseScraper):
+
     REGISTROS_POR_PAGINA = 50
 
     def nombre_fuente(self) -> str:

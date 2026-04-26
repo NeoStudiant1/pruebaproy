@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 import os
 import re
 import time
@@ -80,7 +81,6 @@ class ILOLabordocScraper(BaseScraper):
 
                 try:
                     pagina.goto(url_busqueda, wait_until="networkidle", timeout=60000)
-
                     time.sleep(5)
 
                     try:
@@ -123,7 +123,7 @@ class ILOLabordocScraper(BaseScraper):
                         break
 
                     offset += self.RESULTADOS_POR_PAGINA
-                    time.sleep(2)
+                    time.sleep(2)  
 
                 except Exception as e:
                     logger.error(f"Error al procesar pagina offset={offset}: {e}", exc_info=True)
@@ -233,16 +233,13 @@ class ILOLabordocScraper(BaseScraper):
         return documentos
 
     def _obtener_url_pdf(self, pagina, url_registro: str) -> List[str]:
-
         urls_pdf = []
 
         try:
-
             import html as html_module
             url_limpia = html_module.unescape(url_registro)
 
             pagina.goto(url_limpia, wait_until="networkidle", timeout=45000)
-
             time.sleep(6)
 
             html_contenido = pagina.content()
@@ -298,7 +295,7 @@ class ILOLabordocScraper(BaseScraper):
             urls_filtradas = [
                 u for u in urls_unicas
                 if not any(excl in u.lower() for excl in [
-                    '/thumbnail/',      
+                    '/thumbnail/',     
                     'ignoredefault',     
                     '.css', '.js', '.png', '.jpg', '.gif', '.svg',
                     'google.com', 'facebook.com', 'twitter.com',
