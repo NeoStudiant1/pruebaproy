@@ -304,6 +304,7 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
             filtros.limite = limite_default
     else:
         filtros.limite = limite_default
+
     carpeta_default = CONFIG.get("ultima_carpeta_usada") or CARPETA_DESCARGA
     print()
     print(f"  Carpeta de descarga actual: {carpeta_default}")

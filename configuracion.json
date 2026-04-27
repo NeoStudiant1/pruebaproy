@@ -3,14 +3,12 @@
     "anio_maximo_permitido": 2026,
     "carpeta_descarga_por_defecto": "./documentos_descargados",
     "limite_documentos_por_defecto": 50,
-    "ultima_carpeta_usada": null,
-
+    "ultima_carpeta_usada": "",
     "ilo_search_scope": "ALL_ILO",
     "ilo_tab": "ALL_ILO",
-
     "idiomas_validos": {
         "en": "Ingles",
-        "es": "Espanol",
+        "es": "Español",
         "fr": "Frances",
         "ar": "Arabe",
         "zh": "Chino",
