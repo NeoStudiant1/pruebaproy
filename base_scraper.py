@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Set
 import logging
 
 logger = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class DocumentoResultado:
     titulo: str = ""
     autor: str = ""
-    anio: str = ""
+    fecha: str = ""
     idioma: str = ""
     tipo_documento: str = ""
     url_fuente: str = ""
@@ -24,8 +24,8 @@ class DocumentoResultado:
 @dataclass
 class FiltrosBusqueda:
     palabras_clave: List[str] = field(default_factory=list)
-    anio_desde: Optional[int] = None
-    anio_hasta: Optional[int] = None
+    fecha_desde: Optional[int] = None
+    fecha_hasta: Optional[int] = None
     idioma: Optional[List[str]] = None
     tipo_documento: Optional[str] = None
     limite: int = 50
@@ -38,7 +38,8 @@ class BaseScraper(ABC):
         pass
 
     @abstractmethod
-    def search(self, filtros: FiltrosBusqueda) -> List[DocumentoResultado]:
+    def search(self, filtros: FiltrosBusqueda,
+               ids_excluir: Optional[Set[str]] = None) -> List[DocumentoResultado]:
         pass
 
     @abstractmethod

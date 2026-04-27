@@ -149,6 +149,7 @@ python main.py
 | `documentos_descargados/metadata.csv` | Metadatos en formato CSV (tabular, para Excel/Sheets) |
 | `documentos_descargados/metadata.json` | Metadatos en formato JSON (estructurado, con texto completo) |
 | `documentos_descargados/textos_extraidos.txt` | Texto consolidado de todos los PDFs descargados |
+| `historial_descargas.json` | Indice acumulado de todos los documentos ya descargados (en la raiz del proyecto) |
 | `errores.log` | Log detallado de la sesion (para depuracion) |
 
 ### Formato de los metadatos (CSV y JSON)
@@ -209,6 +210,48 @@ Otros marcadores que pueden aparecer en `texto_extraido`:
 - `[PDF VACIO O SIN CONTENIDO TEXTUAL]` — el PDF no tenia paginas con texto
 - `[ERROR AL LEER EL PDF]` — el archivo estaba corrupto o protegido
 - `[ARCHIVO NO DESCARGADO]` — la descarga del PDF fallo
+
+
+## Historial acumulado de descargas
+
+El archivo `historial_descargas.json` (en la raiz del proyecto) guarda un
+indice de todos los documentos que el programa ha intentado descargar, sean
+exitosos o fallidos. Esto evita que:
+
+- Descargues dos veces el mismo documento aunque corras busquedas repetidas.
+- Reintentes documentos que ya fallaron anteriormente (algunos documentos
+  simplemente no tienen PDF disponible y seguirian fallando).
+
+### Como funciona
+
+Al iniciar una busqueda, el programa lee el historial y le pasa al scraper
+la lista de documentos ya conocidos. El scraper los salta silenciosamente
+y sigue buscando hasta completar el numero de documentos que pediste.
+
+Ejemplo: si pides 15 documentos sobre "climate change" y el programa detecta
+que 12 ya estan en tu historial, buscara en mas paginas hasta conseguir 15
+documentos nuevos reales (o hasta que no queden mas en la fuente).
+
+Al final de la sesion se muestra cuantos documentos hay en total en el
+historial acumulado.
+
+### Como borrar o editar el historial
+
+- Para **borrar todo el historial** (empezar de cero): borra el archivo
+  `historial_descargas.json`. El programa lo crea de nuevo la siguiente
+  sesion.
+- Para **borrar entradas especificas** (forzar re-descarga de ciertos
+  documentos): abre el archivo con el Bloc de notas, busca la entrada
+  correspondiente por su ID o titulo, y borra ese bloque. Cuida de no
+  romper la estructura JSON (comas, llaves).
+- Para **inspeccionar que tienes descargado**: el archivo es legible en
+  cualquier editor de texto. Cada entrada incluye titulo, fuente, fecha
+  de publicacion, fecha de descarga, ruta del archivo y estado (exitoso
+  o fallido).
+
+Si el archivo se corrompe por error, el programa muestra un mensaje claro
+al iniciar y sigue funcionando sin la deteccion de duplicados hasta que lo
+arregles o lo borres.
 
 
 ## Solucion de problemas

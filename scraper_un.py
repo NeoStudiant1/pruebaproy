@@ -6,7 +6,7 @@ import sys
 import time
 import logging
 import requests
-from typing import List, Optional
+from typing import List, Optional, Set
 from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,6 @@ PATRONES_URL_IGNORADAS = [
 HEADERS_DESCARGA = {
     "User-Agent": USER_AGENT,
 }
-
 
 def _descargar_con_progreso(respuesta, ruta_archivo: str,
                              titulo_doc: str) -> bool:
@@ -127,8 +126,11 @@ class UNDigitalLibraryScraper(BaseScraper):
     def nombre_fuente(self) -> str:
         return "UN Digital Library"
 
-    def search(self, filtros: FiltrosBusqueda) -> List[DocumentoResultado]:
+    def search(self, filtros: FiltrosBusqueda,
+               ids_excluir: Optional[Set[str]] = None) -> List[DocumentoResultado]:
         self.ultima_degradacion_filtro = None
+
+        ids_excluir = ids_excluir or set()
 
         query = " ".join(filtros.palabras_clave) if filtros.palabras_clave else ""
         if not query:
@@ -139,9 +141,9 @@ class UNDigitalLibraryScraper(BaseScraper):
         logger.info(f"Limite configurado: {filtros.limite} documentos")
         if filtros.tipo_documento:
             logger.info(f"Filtro de tipo solicitado: {filtros.tipo_documento}")
-        if filtros.anio_desde or filtros.anio_hasta:
-            logger.info(f"Rango de fechas: {filtros.anio_desde or '-'} a "
-                        f"{filtros.anio_hasta or '-'}")
+        if filtros.fecha_desde or filtros.fecha_hasta:
+            logger.info(f"Rango de fechas: {filtros.fecha_desde or '-'} a "
+                        f"{filtros.fecha_hasta or '-'}")
 
         try:
             from playwright.sync_api import sync_playwright
@@ -166,7 +168,8 @@ class UNDigitalLibraryScraper(BaseScraper):
             pagina.set_default_timeout(45000)
 
             record_ids = self._buscar_record_ids(
-                pagina, query, filtros, usar_filtro_tipo=True
+                pagina, query, filtros, usar_filtro_tipo=True,
+                ids_excluir=ids_excluir,
             )
 
             if not record_ids and filtros.tipo_documento:
@@ -187,7 +190,8 @@ class UNDigitalLibraryScraper(BaseScraper):
                     "fuente": self.nombre_fuente(),
                 }
                 record_ids = self._buscar_record_ids(
-                    pagina, query, filtros, usar_filtro_tipo=False
+                    pagina, query, filtros, usar_filtro_tipo=False,
+                    ids_excluir=ids_excluir,
                 )
 
             if not record_ids:
@@ -249,11 +253,11 @@ class UNDigitalLibraryScraper(BaseScraper):
             f"&of=hb"
         )
 
-        if filtros.anio_desde:
-            url += f"&d1y={filtros.anio_desde}&d1m=01&d1d=01"
-        if filtros.anio_hasta:
-            url += f"&d2y={filtros.anio_hasta}&d2m=12&d2d=31"
-        if filtros.anio_desde or filtros.anio_hasta:
+        if filtros.fecha_desde:
+            url += f"&d1y={filtros.fecha_desde}&d1m=01&d1d=01"
+        if filtros.fecha_hasta:
+            url += f"&d2y={filtros.fecha_hasta}&d2m=12&d2d=31"
+        if filtros.fecha_desde or filtros.fecha_hasta:
             url += "&dt=c"
 
         return url
@@ -309,7 +313,9 @@ class UNDigitalLibraryScraper(BaseScraper):
 
     def _buscar_record_ids(self, pagina, query: str,
                             filtros: FiltrosBusqueda,
-                            usar_filtro_tipo: bool) -> List[str]:
+                            usar_filtro_tipo: bool,
+                            ids_excluir: Optional[Set[str]] = None) -> List[str]:
+        ids_excluir = ids_excluir or set()
         record_ids = []
         pagina_num = 1
         ids_necesarios = filtros.limite
@@ -333,19 +339,28 @@ class UNDigitalLibraryScraper(BaseScraper):
 
             ids_pagina = re.findall(r'/record/(\d+)', html)
 
+            total_en_pagina = 0
             ids_unicos = []
             ids_vistos = set(record_ids)
+            excluidos_esta_pagina = 0
             for rid in ids_pagina:
-                if rid not in ids_vistos and rid not in ids_unicos:
-                    ids_unicos.append(rid)
-                    ids_vistos.add(rid)
+                if rid in ids_vistos:
+                    continue
+                ids_vistos.add(rid)
+                total_en_pagina += 1
+                if f"UN:{rid}" in ids_excluir:
+                    excluidos_esta_pagina += 1
+                    continue
+                ids_unicos.append(rid)
 
             logger.info(
                 f"[{descripcion}] DIAGNOSTICO: HTML recibido "
-                f"({len(html):,} bytes), {len(ids_unicos)} IDs unicos extraidos"
+                f"({len(html):,} bytes), {total_en_pagina} IDs unicos en la "
+                f"pagina, {excluidos_esta_pagina} excluidos por historial, "
+                f"{len(ids_unicos)} a procesar"
             )
 
-            if not ids_unicos:
+            if total_en_pagina == 0:
                 if self._es_pagina_sin_resultados(html):
                     logger.info(
                         f"[{descripcion}] DIAGNOSTICO: cero resultados "
@@ -364,8 +379,7 @@ class UNDigitalLibraryScraper(BaseScraper):
                 f"[{descripcion}] {len(ids_unicos)} IDs nuevos "
                 f"(total acumulado: {len(record_ids)}/{ids_necesarios})"
             )
-
-            if len(ids_unicos) < 5:
+            if total_en_pagina < 5:
                 break
 
             pagina_num += 1
@@ -420,7 +434,7 @@ class UNDigitalLibraryScraper(BaseScraper):
             html, re.DOTALL | re.IGNORECASE
         )
         if match_fecha:
-            doc.anio = match_fecha.group(1)
+            doc.fecha = match_fecha.group(1)
 
         urls_relativas = re.findall(
             rf'/record/{re.escape(recid)}/files/[^\s"\'<>]+\.pdf',

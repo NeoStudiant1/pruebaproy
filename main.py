@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 def obtener_scrapers_disponibles() -> List[dict]:
+    scrapers = []
 
     try:
         from scraper_un import UNDigitalLibraryScraper
@@ -144,6 +145,90 @@ CONFIG = cargar_configuracion()
 
 CARPETA_DESCARGA = CONFIG.get("carpeta_descarga_por_defecto",
                                "./documentos_descargados")
+
+
+RUTA_HISTORIAL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "historial_descargas.json"
+)
+
+ESTADO_EXITOSO = "exitoso"
+ESTADO_FALLIDO = "fallido"
+
+
+def cargar_historial() -> dict:
+    historial_vacio = {
+        "version": 1,
+        "actualizado": None,
+        "descargas": {},
+    }
+
+    if not os.path.exists(RUTA_HISTORIAL):
+        return historial_vacio
+
+    try:
+        with open(RUTA_HISTORIAL, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+        if not isinstance(datos, dict):
+            raise ValueError("El contenido no es un objeto JSON valido")
+        if "descargas" not in datos or not isinstance(datos["descargas"], dict):
+            datos["descargas"] = {}
+        if "version" not in datos:
+            datos["version"] = 1
+        return datos
+    except json.JSONDecodeError as e:
+        print()
+        print("  " + "=" * 56)
+        print("  ERROR AL LEER historial_descargas.json")
+        print("  " + "=" * 56)
+        print(f"  El archivo tiene un error de formato en la linea {e.lineno}:")
+        print(f"    {e.msg}")
+        print()
+        print("  El programa funcionara igual, pero sin la deteccion de")
+        print("  duplicados hasta que arregles el archivo o lo borres.")
+        print("  " + "=" * 56)
+        print()
+        return historial_vacio
+    except Exception as e:
+        logger.warning(f"Error leyendo historial_descargas.json: {e}")
+        return historial_vacio
+
+
+def guardar_historial(historial: dict):
+    try:
+        historial["actualizado"] = datetime.now().replace(microsecond=0).isoformat()
+        with open(RUTA_HISTORIAL, "w", encoding="utf-8") as f:
+            json.dump(historial, f, indent=2, ensure_ascii=False)
+        logger.debug(f"Historial guardado: {RUTA_HISTORIAL} "
+                     f"({len(historial.get('descargas', {}))} registros)")
+    except Exception as e:
+        logger.warning(f"No se pudo guardar historial_descargas.json: {e}")
+
+
+def ids_excluir_desde_historial(historial: dict) -> set:
+    descargas = historial.get("descargas", {})
+    if not isinstance(descargas, dict):
+        return set()
+    return set(descargas.keys())
+
+
+def registrar_en_historial(historial: dict, id_unico: str, registro: dict):
+    if "descargas" not in historial:
+        historial["descargas"] = {}
+    historial["descargas"][id_unico] = registro
+
+
+def construir_id_unico(fuente: str, recid: str) -> Optional[str]:
+    if not recid:
+        return None
+    prefijo_upper = fuente.upper()
+    if "ILO" in prefijo_upper or "LABORDOC" in prefijo_upper:
+        prefijo = "ILO"
+    elif "UN " in prefijo_upper or "NACIONES" in prefijo_upper or prefijo_upper.startswith("UN"):
+        prefijo = "UN"
+    else:
+        prefijo = prefijo_upper[:3].replace(" ", "")
+    return f"{prefijo}:{recid}"
 
 
 def limpiar_pantalla():
@@ -384,12 +469,24 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
     print("  (Esto puede tomar unos segundos dependiendo de la fuente)")
     print()
 
+    historial = cargar_historial()
+    ids_excluir = ids_excluir_desde_historial(historial)
+    if ids_excluir:
+        logger.info(f"Historial cargado: {len(ids_excluir)} documentos ya "
+                    f"registrados, se excluiran de esta busqueda.")
+        print(f"  (Historial: {len(ids_excluir)} documentos previos se "
+              "saltaran automaticamente)")
+        print()
+
     inicio_busqueda = time.time()
-    resultados = scraper.search(filtros)
+    resultados = scraper.search(filtros, ids_excluir=ids_excluir)
     tiempo_busqueda = time.time() - inicio_busqueda
 
     if not resultados:
-        print("  No se encontraron documentos con los filtros especificados.")
+        print("  No se encontraron documentos nuevos con los filtros especificados.")
+        if ids_excluir:
+            print("  (Todos los documentos que coinciden ya estan en el historial,")
+            print("   o no hay mas resultados disponibles en la fuente.)")
         print("  Sugerencias:")
         print("    - Verifica que las palabras clave sean correctas")
         print("    - Ampliar el rango de fechas")
@@ -406,21 +503,27 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
     fallidos = 0
     archivos_descargados = []  
     inicio_descarga = time.time()
+    nombre_fuente = scraper.nombre_fuente()
 
     for i, doc in enumerate(resultados, 1):
         print(f"  Descargando documento {i} de {len(resultados)}: {doc.titulo[:60]}...")
 
         ruta = scraper.download(doc, carpeta_destino)
+
         fecha_descarga_iso = datetime.now().replace(microsecond=0).isoformat()
 
         if ruta:
             exitosos += 1
             archivo_local = os.path.basename(ruta)
+            ruta_absoluta = os.path.abspath(ruta)
             texto_extraido = extraer_texto_pdf(ruta)
+            estado_descarga = ESTADO_EXITOSO
         else:
             fallidos += 1
             archivo_local = "DESCARGA_FALLIDA"
+            ruta_absoluta = ""
             texto_extraido = TEXTO_NO_DESCARGADO
+            estado_descarga = ESTADO_FALLIDO
 
         archivos_descargados.append({
             "titulo": doc.titulo,
@@ -434,18 +537,31 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             "texto_extraido": texto_extraido,
         })
 
+        id_unico = construir_id_unico(nombre_fuente, doc.recid)
+        if id_unico:
+            registrar_en_historial(historial, id_unico, {
+                "fuente": nombre_fuente,
+                "titulo": doc.titulo,
+                "url_fuente": doc.url_fuente,
+                "fecha_publicacion": doc.fecha,
+                "fecha_descarga": fecha_descarga_iso,
+                "ruta_archivo": ruta_absoluta,
+                "estado": estado_descarga,
+            })
+
         if i < len(resultados):
             time.sleep(1)
 
     tiempo_descarga = time.time() - inicio_descarga
 
-    
     ruta_csv = os.path.join(carpeta_destino, "metadata.csv")
     ruta_json = os.path.join(carpeta_destino, "metadata.json")
     ruta_textos = os.path.join(carpeta_destino, "textos_extraidos.txt")
     generar_csv_metadatos(archivos_descargados, ruta_csv)
     generar_json_metadatos(archivos_descargados, ruta_json)
     generar_archivo_textos_consolidado(archivos_descargados, ruta_textos)
+
+    guardar_historial(historial)
 
     print()
     print("=" * 50)
@@ -460,6 +576,9 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
     print(f"  Metadatos CSV:                   {os.path.abspath(ruta_csv)}")
     print(f"  Metadatos JSON:                  {os.path.abspath(ruta_json)}")
     print(f"  Textos extraidos:                {os.path.abspath(ruta_textos)}")
+    print(f"  Historial actualizado:           {os.path.abspath(RUTA_HISTORIAL)}")
+    total_historial = len(historial.get("descargas", {}))
+    print(f"  Total en historial acumulado:    {total_historial} documentos")
     print("=" * 50)
 
     if fallidos > 0:
@@ -688,6 +807,27 @@ def diagnostico():
     except Exception:
         print("  [ERROR] No se pudo conectar a ILO Labordoc")
         todo_ok = False
+
+    print()
+    print("  Historial de descargas:")
+    try:
+        hist = cargar_historial()
+        descargas = hist.get("descargas", {})
+        total = len(descargas)
+        if total == 0:
+            print("  [INFO] No hay registros en el historial todavia.")
+        else:
+            exitosos = sum(1 for r in descargas.values()
+                           if isinstance(r, dict) and r.get("estado") == ESTADO_EXITOSO)
+            fallidos = sum(1 for r in descargas.values()
+                           if isinstance(r, dict) and r.get("estado") == ESTADO_FALLIDO)
+            print(f"  [OK] {total} documentos en el historial "
+                  f"({exitosos} exitosos, {fallidos} fallidos)")
+            ultima = hist.get("actualizado")
+            if ultima:
+                print(f"  [OK] Ultima actualizacion: {ultima}")
+    except Exception as e:
+        print(f"  [AVISO] No se pudo leer el historial: {e}")
 
     print()
     if todo_ok:

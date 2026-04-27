@@ -6,7 +6,7 @@ import sys
 import time
 import logging
 import requests
-from typing import List, Optional
+from typing import List, Optional, Set
 from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
 
 logger = logging.getLogger(__name__)
@@ -157,8 +157,11 @@ class ILOLabordocScraper(BaseScraper):
     def nombre_fuente(self) -> str:
         return "ILO Labordoc"
 
-    def search(self, filtros: FiltrosBusqueda) -> List[DocumentoResultado]:
+    def search(self, filtros: FiltrosBusqueda,
+               ids_excluir: Optional[Set[str]] = None) -> List[DocumentoResultado]:
         self.ultima_degradacion_filtro = None
+
+        ids_excluir = ids_excluir or set()
 
         self.diag_total_visitados = 0
         self.diag_con_pdf_primer_intento = 0
@@ -180,9 +183,9 @@ class ILOLabordocScraper(BaseScraper):
         logger.info(f"Scope de busqueda: {SEARCH_SCOPE}")
         if filtros.tipo_documento:
             logger.info(f"Filtro de tipo solicitado: {filtros.tipo_documento}")
-        if filtros.anio_desde or filtros.anio_hasta:
-            logger.info(f"Rango de fechas: {filtros.anio_desde or '-'} a "
-                        f"{filtros.anio_hasta or '-'}")
+        if filtros.fecha_desde or filtros.fecha_hasta:
+            logger.info(f"Rango de fechas: {filtros.fecha_desde or '-'} a "
+                        f"{filtros.fecha_hasta or '-'}")
 
         try:
             from playwright.sync_api import sync_playwright
@@ -207,7 +210,8 @@ class ILOLabordocScraper(BaseScraper):
             pagina.set_default_timeout(45000)
 
             resultados = self._ejecutar_busqueda(
-                pagina, query, filtros, usar_filtro_tipo=True
+                pagina, query, filtros, usar_filtro_tipo=True,
+                ids_excluir=ids_excluir,
             )
 
             if not resultados and filtros.tipo_documento:
@@ -228,7 +232,8 @@ class ILOLabordocScraper(BaseScraper):
                     "fuente": self.nombre_fuente(),
                 }
                 resultados = self._ejecutar_busqueda(
-                    pagina, query, filtros, usar_filtro_tipo=False
+                    pagina, query, filtros, usar_filtro_tipo=False,
+                    ids_excluir=ids_excluir,
                 )
 
             navegador.close()
@@ -257,7 +262,9 @@ class ILOLabordocScraper(BaseScraper):
 
     def _ejecutar_busqueda(self, pagina, query: str,
                            filtros: FiltrosBusqueda,
-                           usar_filtro_tipo: bool) -> List[DocumentoResultado]:
+                           usar_filtro_tipo: bool,
+                           ids_excluir: Optional[Set[str]] = None) -> List[DocumentoResultado]:
+        ids_excluir = ids_excluir or set()
         resultados: List[DocumentoResultado] = []
         offset = 0
 
@@ -281,13 +288,24 @@ class ILOLabordocScraper(BaseScraper):
 
             documentos_pagina = self._extraer_resultados(pagina)
 
+            total_en_pagina = len(documentos_pagina)
+
+            docs_a_procesar = []
+            excluidos_esta_pagina = 0
+            for doc in documentos_pagina:
+                if doc.recid and f"ILO:{doc.recid}" in ids_excluir:
+                    excluidos_esta_pagina += 1
+                    continue
+                docs_a_procesar.append(doc)
+
             logger.info(
                 f"[{descripcion}] DIAGNOSTICO: HTML recibido "
-                f"({len(html):,} bytes), "
-                f"{len(documentos_pagina)} enlaces a registros extraidos"
+                f"({len(html):,} bytes), {total_en_pagina} docs en la pagina, "
+                f"{excluidos_esta_pagina} excluidos por historial, "
+                f"{len(docs_a_procesar)} a procesar"
             )
 
-            if not documentos_pagina:
+            if total_en_pagina == 0:
                 if self._es_pagina_sin_resultados(pagina, html):
                     logger.info(
                         f"[{descripcion}] DIAGNOSTICO: cero resultados "
@@ -301,7 +319,7 @@ class ILOLabordocScraper(BaseScraper):
                     )
                 break
 
-            for doc in documentos_pagina:
+            for doc in docs_a_procesar:
                 if len(resultados) >= filtros.limite:
                     break
                 if doc.url_fuente:
@@ -310,11 +328,11 @@ class ILOLabordocScraper(BaseScraper):
                 resultados.append(doc)
 
             logger.info(
-                f"[{descripcion}] {len(documentos_pagina)} resultados de esta "
+                f"[{descripcion}] {total_en_pagina} resultados de esta "
                 f"pagina (total acumulado: {len(resultados)}/{filtros.limite})"
             )
 
-            if len(documentos_pagina) < self.RESULTADOS_POR_PAGINA:
+            if total_en_pagina < self.RESULTADOS_POR_PAGINA:
                 break
 
             offset += self.RESULTADOS_POR_PAGINA
@@ -353,9 +371,9 @@ class ILOLabordocScraper(BaseScraper):
                 url += f"&mfacet=rtype,include,{tipo_primo},{posicion_facet}"
                 posicion_facet += 1
 
-        if filtros.anio_desde or filtros.anio_hasta:
-            desde = filtros.anio_desde or 1900
-            hasta = filtros.anio_hasta or 2030
+        if filtros.fecha_desde or filtros.fecha_hasta:
+            desde = filtros.fecha_desde or 1900
+            hasta = filtros.fecha_hasta or 2030
             url += (f"&mfacet=searchcreationdate,include,"
                     f"{desde}%7C,%7C{hasta},{posicion_facet}")
             posicion_facet += 1
@@ -715,7 +733,6 @@ class ILOLabordocScraper(BaseScraper):
 
     def _obtener_url_pdf(self, pagina, url_registro: str) -> List[str]:
         self.diag_total_visitados += 1
-
         docid = self._extraer_docid(url_registro)
         if docid:
             urls_api = self._extraer_urls_via_api_rest(docid)
