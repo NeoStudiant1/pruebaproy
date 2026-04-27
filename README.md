@@ -1,8 +1,8 @@
-# Descargador de Documentos - Bibliotecas Digitales
+# Metodo Web Scraipng - Libreria Digital UN & Labordoc ILO
 
 Herramienta de linea de comandos para buscar y descargar documentos PDF
-desde la Biblioteca Digital de Naciones Unidas (UN Digital Library) y el
-repositorio Labordoc de la Organizacion Internacional del Trabajo (OIT).
+desde la Biblioteca Digital de Naciones Unidas y el repositorio Labordoc 
+de la Organizacion Internacional del Trabajo.
 
 
 ## Estructura del proyecto
@@ -27,11 +27,7 @@ proyecto_scraper/
 - Windows 10/11, macOS o Linux
 
 
-## Instrucciones de instalacion (paso a paso para VS Code)
-
-Estas instrucciones estan escritas para personas sin experiencia previa
-en programacion. Si ya tienes Python y VS Code configurados, puedes
-saltar directamente al paso 3.
+## Instrucciones de instalacion
 
 ### Paso 1: Instalar Python
 
@@ -148,7 +144,7 @@ python main.py
 ### Ejemplo de sesion
 
 ```
-  Palabras clave (separadas por coma): child labour, forced labour
+  Palabra clave (Max 1): child labour, forced labour
   Fecha desde (ej: 2015): 2020
   Fecha hasta (ej: 2024): 2024
   Codigo de idioma (ej: es): en

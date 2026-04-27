@@ -392,7 +392,6 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     print("  (Deja en blanco para omitir un filtro)")
     print()
 
-    # --- Palabras clave (obligatorio) ---
     while True:
         entrada = input("  Palabra clave (Max 1 palabra): ").strip()
         if entrada:
@@ -552,7 +551,7 @@ def confirmar_busqueda(filtros: FiltrosBusqueda, nombre_fuente: str) -> bool:
     print("  RESUMEN DE LA BUSQUEDA")
     print("-" * 50)
     print(f"  Fuente:            {nombre_fuente}")
-    print(f"  Palabras clave:    {', '.join(filtros.palabras_clave)}")
+    print(f"  Palabra clave:    {', '.join(filtros.palabras_clave)}")
     print(f"  Fecha desde:       {filtros.fecha_desde or 'Sin limite'}")
     print(f"  Fecha hasta:       {filtros.fecha_hasta or 'Sin limite'}")
     print(f"  Idioma:            {', '.join(filtros.idioma) if filtros.idioma else 'Todos'}")
@@ -598,7 +597,7 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             print("  (Todos los documentos que coinciden ya estan en el historial,")
             print("   o no hay mas resultados disponibles en la fuente.)")
         print("  Sugerencias:")
-        print("    - Verifica que las palabras clave sean correctas")
+        print("    - Verifica que la palabra clave sean correctas")
         print("    - Ampliar el rango de fechas")
         print("    - Probar sin filtro de idioma o tipo de documento")
         return
