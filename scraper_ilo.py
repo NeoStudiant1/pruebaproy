@@ -54,6 +54,7 @@ PATRONES_URL_IGNORADAS = [
     "analytics", "tracking", "googletagmanager",
 ]
 
+
 def _descargar_con_progreso(respuesta, ruta_archivo: str,
                              titulo_doc: str) -> bool:
     titulo_corto = (titulo_doc[:45] + "...") if len(titulo_doc) > 48 else titulo_doc
@@ -123,11 +124,25 @@ class ILOLabordocScraper(BaseScraper):
     def __init__(self):
         self.ultima_degradacion_filtro: Optional[dict] = None
 
+        self.diag_total_visitados: int = 0
+        self.diag_con_pdf_primer_intento: int = 0
+        self.diag_con_pdf_segundo_intento: int = 0  
+        self.diag_sin_pdf_explicito: int = 0  
+        self.diag_sin_pdf_tras_reintento: int = 0  
+        self.diag_error_navegacion: int = 0  
+
     def nombre_fuente(self) -> str:
         return "ILO Labordoc"
 
     def search(self, filtros: FiltrosBusqueda) -> List[DocumentoResultado]:
         self.ultima_degradacion_filtro = None
+
+        self.diag_total_visitados = 0
+        self.diag_con_pdf_primer_intento = 0
+        self.diag_con_pdf_segundo_intento = 0
+        self.diag_sin_pdf_explicito = 0
+        self.diag_sin_pdf_tras_reintento = 0
+        self.diag_error_navegacion = 0
 
         query = " ".join(filtros.palabras_clave) if filtros.palabras_clave else ""
         if not query:
@@ -193,6 +208,22 @@ class ILOLabordocScraper(BaseScraper):
             navegador.close()
 
         logger.info(f"Busqueda completada. Total de documentos encontrados: {len(resultados)}")
+
+        con_pdf = self.diag_con_pdf_primer_intento + self.diag_con_pdf_segundo_intento
+        sin_pdf = (self.diag_sin_pdf_explicito + self.diag_sin_pdf_tras_reintento
+                   + self.diag_error_navegacion)
+        resumen = (
+            f"Resumen ILO: {self.diag_total_visitados} encontrados | "
+            f"{con_pdf} con PDF "
+            f"({self.diag_con_pdf_segundo_intento} capturados en reintento AJAX tardio) | "
+            f"{sin_pdf} sin PDF "
+            f"({self.diag_sin_pdf_explicito} legitimos por mensaje explicito, "
+            f"{self.diag_sin_pdf_tras_reintento} vacios tras reintento, "
+            f"{self.diag_error_navegacion} errores de navegacion)"
+        )
+        logger.info(resumen)
+        print(f"\n  {resumen}\n")
+
         return resultados
 
     def _ejecutar_busqueda(self, pagina, query: str,
@@ -462,7 +493,8 @@ class ILOLabordocScraper(BaseScraper):
         return documentos
 
     def _obtener_url_pdf(self, pagina, url_registro: str) -> List[str]:
-        urls_pdf = []
+        self.diag_total_visitados += 1
+        urls_pdf: List[str] = []
 
         try:
             import html as html_module
@@ -470,7 +502,6 @@ class ILOLabordocScraper(BaseScraper):
 
             pagina.goto(url_limpia, wait_until="domcontentloaded", timeout=30000)
 
-            selector_pdf_aparecio = False
             inicio_espera = time.time()
             try:
                 pagina.wait_for_selector(
@@ -484,7 +515,6 @@ class ILOLabordocScraper(BaseScraper):
                     timeout=5000,
                     state="attached"
                 )
-                selector_pdf_aparecio = True
                 time.sleep(0.5)
             except Exception:
                 tiempo_esperado = time.time() - inicio_espera
@@ -495,26 +525,86 @@ class ILOLabordocScraper(BaseScraper):
                 )
                 time.sleep(3)
 
+            urls_pdf = self._extraer_urls_pdf_del_dom(pagina)
+
+            if urls_pdf:
+                self.diag_con_pdf_primer_intento += 1
+                logger.debug(
+                    f"URLs de PDF encontradas para {url_registro}: {len(urls_pdf)}"
+                )
+                return urls_pdf[:5]
+
+            if self._tiene_mensaje_no_pdf_explicito(pagina):
+                self.diag_sin_pdf_explicito += 1
+                logger.info(
+                    f"DIAGNOSTICO: documento sin PDF segun mensaje explicito "
+                    f"de Primo VE: {url_limpia}"
+                )
+                return []
+
+            logger.debug(
+                f"Primer pase vacio para {url_limpia}, intentando segundo "
+                "pase con espera de enlaces de descarga reales"
+            )
+            try:
+                pagina.wait_for_selector(
+                    'a[href*="/view/delivery/"], '
+                    'a[href*="/media/"], '
+                    'a[href$=".pdf"]',
+                    timeout=4000,
+                    state="attached"
+                )
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+            urls_pdf = self._extraer_urls_pdf_del_dom(pagina)
+
+            if urls_pdf:
+                self.diag_con_pdf_segundo_intento += 1
+                logger.info(
+                    f"DIAGNOSTICO: enlaces capturados en segundo intento "
+                    f"(AJAX tardio detectado): {url_limpia}"
+                )
+                return urls_pdf[:5]
+
+            self.diag_sin_pdf_tras_reintento += 1
+            logger.info(
+                f"DIAGNOSTICO: selector presente pero sin enlaces extraibles "
+                f"despues de reintento: {url_limpia}"
+            )
+            self._dump_html_zona_servicios(pagina, url_limpia)
+            return []
+
+        except Exception as e:
+            self.diag_error_navegacion += 1
+            logger.warning(
+                f"Error al obtener URL de PDF desde {url_registro}: {e}"
+            )
+            return []
+
+    def _extraer_urls_pdf_del_dom(self, pagina) -> List[str]:
+        import html as html_module
+        urls_pdf: List[str] = []
+
+        try:
             html_contenido = pagina.content()
             html_decodificado = html_module.unescape(html_contenido)
 
-            urls_ilo_media = re.findall(
+            urls_pdf.extend(re.findall(
                 r'https?://[^"\'<>\s]*ilo\.org/media/\d+/download',
                 html_decodificado
-            )
-            urls_pdf.extend(urls_ilo_media)
+            ))
 
-            urls_directas_pdf = re.findall(
+            urls_pdf.extend(re.findall(
                 r'https?://[^"\'<>\s]+\.pdf(?:\?[^"\'<>\s]*)?',
                 html_decodificado
-            )
-            urls_pdf.extend(urls_directas_pdf)
+            ))
 
-            urls_delivery = re.findall(
+            urls_pdf.extend(re.findall(
                 r'https?://[^"\'<>\s]*labordoc[^"\'<>\s]*/delivery/[^"\'<>\s]+',
                 html_decodificado
-            )
-            urls_pdf.extend(urls_delivery)
+            ))
 
             if not urls_pdf:
                 try:
@@ -523,7 +613,6 @@ class ILOLabordocScraper(BaseScraper):
                         try:
                             href = enlace.get_attribute("href") or ""
                             texto = (enlace.inner_text() or "").strip().lower()
-
                             es_descarga = (
                                 "/download" in href.lower() or
                                 href.lower().endswith(".pdf") or
@@ -534,7 +623,6 @@ class ILOLabordocScraper(BaseScraper):
                                 "online access" in texto or
                                 "texto completo" in texto
                             )
-
                             if es_descarga and href.startswith("http"):
                                 if "javascript:" not in href:
                                     urls_pdf.append(href)
@@ -555,13 +643,73 @@ class ILOLabordocScraper(BaseScraper):
                 if '/view/delivery/' in u or '/media/' in u
             ]
             urls_resto = [u for u in urls_filtradas if u not in urls_prioritarias]
-            urls_pdf = urls_prioritarias + urls_resto
+            return urls_prioritarias + urls_resto
 
         except Exception as e:
-            logger.warning(f"Error al obtener URL de PDF desde {url_registro}: {e}")
+            logger.debug(f"Error extrayendo URLs del DOM: {e}")
+            return []
 
-        logger.debug(f"URLs de PDF encontradas para {url_registro}: {len(urls_pdf)}")
-        return urls_pdf[:5]
+    def _tiene_mensaje_no_pdf_explicito(self, pagina) -> bool:
+        frases_no_pdf = [
+            "no full text available",
+            "not available online",
+            "online access not available",
+            "no online access",
+            "no full-text available",
+            "full text not available",
+        ]
+
+        try:
+            contenedores = pagina.query_selector_all(
+                "prm-full-view-service-container, "
+                "prm-service-container, "
+                ".full-view-inner-container, "
+                "prm-no-records, "
+                ".no-records-message"
+            )
+            for cont in contenedores:
+                try:
+                    texto = (cont.inner_text() or "").strip().lower()
+                    if not texto:
+                        continue
+                    if any(frase in texto for frase in frases_no_pdf):
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        return False
+
+    def _dump_html_zona_servicios(self, pagina, url_limpia: str):
+        try:
+            contenedores = pagina.query_selector_all(
+                "prm-full-view-service-container, "
+                "prm-service-container, "
+                ".full-view-inner-container"
+            )
+            if not contenedores:
+                logger.debug(
+                    f"DUMP HTML para {url_limpia}: ningun contenedor "
+                    "de servicios encontrado en el DOM"
+                )
+                return
+
+            for i, cont in enumerate(contenedores[:2]):  
+                try:
+                    inner = cont.inner_html() or ""
+                    fragmento = inner[:500].replace("\n", " ").strip()
+                    logger.debug(
+                        f"DUMP HTML para {url_limpia} contenedor #{i}: "
+                        f"{fragmento}"
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"DUMP HTML para {url_limpia} contenedor #{i}: "
+                        f"error leyendo inner_html: {e}"
+                    )
+        except Exception as e:
+            logger.debug(f"DUMP HTML fallo para {url_limpia}: {e}")
 
     def download(self, documento: DocumentoResultado, carpeta_destino: str,
                  intentos_max: int = 3) -> Optional[str]:
