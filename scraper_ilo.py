@@ -357,6 +357,7 @@ class ILOLabordocScraper(BaseScraper):
                     if intento < MAX_REINTENTOS_BUSQUEDA:
                         time.sleep(BACKOFF_REINTENTOS[intento - 1])
                     continue
+
                 try:
                     pagina.wait_for_selector(
                         'prm-brief-result-container, '
@@ -375,7 +376,6 @@ class ILOLabordocScraper(BaseScraper):
                         "Puede ser: render lento, servidor saturado, "
                         "o cambio en el HTML de Primo VE."
                     )
-                time.sleep(1)
 
                 html = pagina.content()
                 return html
@@ -548,24 +548,31 @@ class ILOLabordocScraper(BaseScraper):
                 )
                 return []
 
-            selectores_servicios = (
-                "prm-full-view-service-container, "
-                "prm-service-container, "
-                ".full-view-inner-container"
+            selector_scroll = (
+                "[prm-digest-when-in-view], "
+                "div[in-view], "
+                "div[prm-digest-when-in-view]"
             )
             try:
-                contenedores = pagina.query_selector_all(selectores_servicios)
-                for cont in contenedores:
+                contenedores = pagina.query_selector_all(selector_scroll)
+                for cont in contenedores[:8]:
                     try:
                         cont.scroll_into_view_if_needed()
                     except Exception:
                         pass
                 logger.debug(
-                    f"Scroll aplicado a {len(contenedores)} contenedores de "
-                    f"servicios para {url_limpia}"
+                    f"Scroll aplicado a {min(len(contenedores), 8)} de "
+                    f"{len(contenedores)} elementos con directiva onInView "
+                    f"para {url_limpia}"
                 )
+                if len(contenedores) == 0:
+                    logger.warning(
+                        f"DIAGNOSTICO: 0 elementos con [prm-digest-when-in-view] "
+                        f"en {url_limpia}. Si el ratio sigue bajo, considerar "
+                        "Opcion 2 (leer del modelo Angular)."
+                    )
             except Exception as e:
-                logger.debug(f"Error en scroll de contenedores: {e}")
+                logger.debug(f"Error en scroll a elementos onInView: {e}")
 
             pagina.wait_for_timeout(300)
 
