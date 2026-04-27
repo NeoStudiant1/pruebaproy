@@ -127,11 +127,14 @@ class ILOLabordocScraper(BaseScraper):
         self.diag_total_visitados: int = 0
         self.diag_con_pdf_primer_intento: int = 0
         self.diag_pdf_sin_scroll: int = 0  
+        self.diag_pdf_via_angular_model: int = 0  
         self.diag_rescatados_por_scroll: int = 0  
         self.diag_con_pdf_segundo_intento: int = 0  
         self.diag_sin_pdf_explicito: int = 0  
         self.diag_sin_pdf_tras_reintento: int = 0  
         self.diag_error_navegacion: int = 0  
+
+        self._dump_angular_pendiente: bool = False
 
     def nombre_fuente(self) -> str:
         return "ILO Labordoc"
@@ -142,11 +145,13 @@ class ILOLabordocScraper(BaseScraper):
         self.diag_total_visitados = 0
         self.diag_con_pdf_primer_intento = 0
         self.diag_pdf_sin_scroll = 0
+        self.diag_pdf_via_angular_model = 0
         self.diag_rescatados_por_scroll = 0
         self.diag_con_pdf_segundo_intento = 0
         self.diag_sin_pdf_explicito = 0
         self.diag_sin_pdf_tras_reintento = 0
         self.diag_error_navegacion = 0
+        self._dump_angular_pendiente = True
 
         query = " ".join(filtros.palabras_clave) if filtros.palabras_clave else ""
         if not query:
@@ -219,7 +224,8 @@ class ILOLabordocScraper(BaseScraper):
         resumen = (
             f"Resumen ILO: {self.diag_total_visitados} encontrados | "
             f"{con_pdf} con PDF "
-            f"({self.diag_pdf_sin_scroll} sin scroll + "
+            f"({self.diag_pdf_via_angular_model} via modelo Angular + "
+            f"{self.diag_pdf_sin_scroll} sin scroll + "
             f"{self.diag_rescatados_por_scroll} rescatados por scroll + "
             f"{self.diag_con_pdf_segundo_intento} AJAX tardio) | "
             f"{sin_pdf} sin PDF "
@@ -377,6 +383,8 @@ class ILOLabordocScraper(BaseScraper):
                         "o cambio en el HTML de Primo VE."
                     )
 
+                time.sleep(1)
+
                 html = pagina.content()
                 return html
 
@@ -450,7 +458,6 @@ class ILOLabordocScraper(BaseScraper):
                     continue
         except Exception as e:
             logger.debug(f"Error extrayendo titulos con Playwright: {e}")
-
         html = pagina.content()
         html_decoded = html_module.unescape(html)
 
@@ -497,6 +504,167 @@ class ILOLabordocScraper(BaseScraper):
 
         return documentos
 
+    def _extraer_urls_via_angular_model(self, pagina, url_limpia: str) -> List[str]:
+        js_script = """
+        () => {
+            const resultado = {
+                urls: [],
+                dump: null,
+                rutas_probadas: [],
+                error: null,
+            };
+            try {
+                if (typeof angular === 'undefined') {
+                    resultado.error = 'angular no definido (no es AngularJS)';
+                    return resultado;
+                }
+                // Buscar el contenedor del registro
+                const cont = document.querySelector('prm-brief-result-container');
+                if (!cont) {
+                    resultado.error = 'prm-brief-result-container no encontrado';
+                    return resultado;
+                }
+                const scope = angular.element(cont).scope();
+                if (!scope || !scope.$ctrl || !scope.$ctrl.item) {
+                    resultado.error = 'scope/$ctrl/item no accesible';
+                    return resultado;
+                }
+                const item = scope.$ctrl.item;
+                const delivery = item.delivery;
+                if (!delivery) {
+                    resultado.error = 'item.delivery no existe';
+                    return resultado;
+                }
+
+                // Dump truncado de la estructura para diagnostico
+                try {
+                    resultado.dump = JSON.stringify(delivery).slice(0, 1500);
+                } catch (e) {
+                    resultado.dump = '[no serializable: ' + e.message + ']';
+                }
+
+                // Helper: anadir URLs de un objeto si las tiene
+                const recolectar = (obj, ruta) => {
+                    if (!obj) return;
+                    let arr = null;
+                    if (Array.isArray(obj)) {
+                        arr = obj;
+                    } else if (Array.isArray(obj.link)) {
+                        arr = obj.link;
+                    } else if (Array.isArray(obj.deliveryService)) {
+                        arr = obj.deliveryService;
+                    } else if (Array.isArray(obj.deliveryItems)) {
+                        arr = obj.deliveryItems;
+                    } else if (Array.isArray(obj.electronicResource)) {
+                        arr = obj.electronicResource;
+                    } else if (Array.isArray(obj.electronicResourceLink)) {
+                        arr = obj.electronicResourceLink;
+                    }
+                    if (!arr) return;
+                    resultado.rutas_probadas.push(ruta + '(' + arr.length + ')');
+
+                    // Tipos de delivery a EXCLUIR (no son descargas reales)
+                    const tipos_excluir = new Set([
+                        'sendto', 'send to', 'email', 'permalink', 'cite',
+                        'citation', 'export', 'print', 'sms', 'twitter',
+                        'facebook', 'refworks', 'endnote', 'bibtex',
+                    ]);
+
+                    for (const elem of arr) {
+                        if (!elem) continue;
+                        // Nombre del tipo: probar varias propiedades
+                        const tipo_raw = (
+                            elem.type || elem.linkType || elem.displayLabel ||
+                            elem.code || elem.name || ''
+                        );
+                        const tipo = String(tipo_raw).toLowerCase().trim();
+                        if (tipos_excluir.has(tipo)) continue;
+                        // Extraer URL: probar varias propiedades comunes
+                        const url = (
+                            elem.url || elem.linkURL || elem.link ||
+                            elem.href || elem['@id'] || ''
+                        );
+                        const url_str = String(url).trim();
+                        if (url_str && url_str.startsWith('http')) {
+                            resultado.urls.push(url_str);
+                        }
+                    }
+                };
+
+                // Probar las rutas mas comunes del modelo de Primo VE
+                recolectar(delivery.link, 'delivery.link');
+                recolectar(delivery.deliveryService, 'delivery.deliveryService');
+                recolectar(delivery.deliveryItems, 'delivery.deliveryItems');
+                recolectar(delivery.electronicResource, 'delivery.electronicResource');
+                recolectar(delivery.electronicResourceLink, 'delivery.electronicResourceLink');
+                recolectar(delivery, 'delivery (raiz)');
+
+                // Tambien buscar en item.pnx.delivery (estructura alternativa)
+                if (item.pnx && item.pnx.delivery) {
+                    recolectar(item.pnx.delivery, 'item.pnx.delivery');
+                }
+            } catch (e) {
+                resultado.error = 'excepcion JS: ' + e.message;
+            }
+            return resultado;
+        }
+        """
+
+        try:
+            resultado = pagina.evaluate(js_script)
+        except Exception as e:
+            logger.debug(f"pagina.evaluate fallo para {url_limpia}: {e}")
+            return []
+
+        if not isinstance(resultado, dict):
+            logger.debug(
+                f"pagina.evaluate devolvio tipo inesperado "
+                f"({type(resultado).__name__}) para {url_limpia}"
+            )
+            return []
+
+        if self._dump_angular_pendiente:
+            self._dump_angular_pendiente = False
+            error = resultado.get("error")
+            dump = resultado.get("dump")
+            rutas = resultado.get("rutas_probadas", [])
+            if error:
+                logger.info(
+                    f"DIAGNOSTICO: dump modelo Angular fallo "
+                    f"({error}) para {url_limpia}"
+                )
+            else:
+                logger.info(
+                    f"DIAGNOSTICO: dump modelo Angular para {url_limpia} | "
+                    f"rutas con datos: {rutas} | "
+                    f"estructura: {dump}"
+                )
+
+        if resultado.get("error"):
+            logger.debug(
+                f"Modelo Angular no accesible para {url_limpia}: "
+                f"{resultado['error']}"
+            )
+            return []
+
+        urls_crudas = resultado.get("urls", [])
+        if not urls_crudas:
+            return []
+
+        urls_filtradas = [
+            u for u in urls_crudas
+            if not any(patron in u.lower() for patron in PATRONES_URL_IGNORADAS)
+        ]
+
+        urls_unicas = list(dict.fromkeys(urls_filtradas))
+
+        urls_prioritarias = [
+            u for u in urls_unicas
+            if '/view/delivery/' in u or '/media/' in u
+        ]
+        urls_resto = [u for u in urls_unicas if u not in urls_prioritarias]
+        return urls_prioritarias + urls_resto
+
     def _obtener_url_pdf(self, pagina, url_registro: str) -> List[str]:
         self.diag_total_visitados += 1
 
@@ -539,6 +707,16 @@ class ILOLabordocScraper(BaseScraper):
                     f"{len(urls_pdf)}"
                 )
                 return urls_pdf[:5]
+
+            urls_angular = self._extraer_urls_via_angular_model(pagina, url_limpia)
+            if urls_angular:
+                self.diag_con_pdf_primer_intento += 1
+                self.diag_pdf_via_angular_model += 1
+                logger.info(
+                    f"DIAGNOSTICO: URLs leidas del modelo Angular para "
+                    f"{url_registro}: {len(urls_angular)}"
+                )
+                return urls_angular[:5]
 
             if self._tiene_mensaje_no_pdf_explicito(pagina):
                 self.diag_sin_pdf_explicito += 1
