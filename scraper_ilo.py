@@ -126,6 +126,8 @@ class ILOLabordocScraper(BaseScraper):
 
         self.diag_total_visitados: int = 0
         self.diag_con_pdf_primer_intento: int = 0
+        self.diag_pdf_sin_scroll: int = 0  
+        self.diag_rescatados_por_scroll: int = 0  
         self.diag_con_pdf_segundo_intento: int = 0  
         self.diag_sin_pdf_explicito: int = 0  
         self.diag_sin_pdf_tras_reintento: int = 0  
@@ -139,6 +141,8 @@ class ILOLabordocScraper(BaseScraper):
 
         self.diag_total_visitados = 0
         self.diag_con_pdf_primer_intento = 0
+        self.diag_pdf_sin_scroll = 0
+        self.diag_rescatados_por_scroll = 0
         self.diag_con_pdf_segundo_intento = 0
         self.diag_sin_pdf_explicito = 0
         self.diag_sin_pdf_tras_reintento = 0
@@ -215,7 +219,9 @@ class ILOLabordocScraper(BaseScraper):
         resumen = (
             f"Resumen ILO: {self.diag_total_visitados} encontrados | "
             f"{con_pdf} con PDF "
-            f"({self.diag_con_pdf_segundo_intento} capturados en reintento AJAX tardio) | "
+            f"({self.diag_pdf_sin_scroll} sin scroll + "
+            f"{self.diag_rescatados_por_scroll} rescatados por scroll + "
+            f"{self.diag_con_pdf_segundo_intento} AJAX tardio) | "
             f"{sin_pdf} sin PDF "
             f"({self.diag_sin_pdf_explicito} legitimos por mensaje explicito, "
             f"{self.diag_sin_pdf_tras_reintento} vacios tras reintento, "
@@ -351,7 +357,6 @@ class ILOLabordocScraper(BaseScraper):
                     if intento < MAX_REINTENTOS_BUSQUEDA:
                         time.sleep(BACKOFF_REINTENTOS[intento - 1])
                     continue
-
                 try:
                     pagina.wait_for_selector(
                         'prm-brief-result-container, '
@@ -494,7 +499,6 @@ class ILOLabordocScraper(BaseScraper):
 
     def _obtener_url_pdf(self, pagina, url_registro: str) -> List[str]:
         self.diag_total_visitados += 1
-        urls_pdf: List[str] = []
 
         try:
             import html as html_module
@@ -515,7 +519,7 @@ class ILOLabordocScraper(BaseScraper):
                     timeout=5000,
                     state="attached"
                 )
-                time.sleep(0.5)
+                time.sleep(0.3)
             except Exception:
                 tiempo_esperado = time.time() - inicio_espera
                 logger.warning(
@@ -529,8 +533,10 @@ class ILOLabordocScraper(BaseScraper):
 
             if urls_pdf:
                 self.diag_con_pdf_primer_intento += 1
+                self.diag_pdf_sin_scroll += 1
                 logger.debug(
-                    f"URLs de PDF encontradas para {url_registro}: {len(urls_pdf)}"
+                    f"URLs de PDF (sin scroll) para {url_registro}: "
+                    f"{len(urls_pdf)}"
                 )
                 return urls_pdf[:5]
 
@@ -542,9 +548,55 @@ class ILOLabordocScraper(BaseScraper):
                 )
                 return []
 
+            selectores_servicios = (
+                "prm-full-view-service-container, "
+                "prm-service-container, "
+                ".full-view-inner-container"
+            )
+            try:
+                contenedores = pagina.query_selector_all(selectores_servicios)
+                for cont in contenedores:
+                    try:
+                        cont.scroll_into_view_if_needed()
+                    except Exception:
+                        pass
+                logger.debug(
+                    f"Scroll aplicado a {len(contenedores)} contenedores de "
+                    f"servicios para {url_limpia}"
+                )
+            except Exception as e:
+                logger.debug(f"Error en scroll de contenedores: {e}")
+
+            pagina.wait_for_timeout(300)
+
+            try:
+                pagina.wait_for_selector(
+                    'a[href*="/view/delivery/"], '
+                    'a[href*="/media/"], '
+                    'a[href$=".pdf"]',
+                    timeout=6000,
+                    state="attached"
+                )
+                time.sleep(0.3)
+            except Exception:
+                logger.debug(
+                    f"Enlace real no aparecio en 6s tras scroll: {url_limpia}"
+                )
+
+            urls_pdf = self._extraer_urls_pdf_del_dom(pagina)
+
+            if urls_pdf:
+                self.diag_con_pdf_primer_intento += 1
+                self.diag_rescatados_por_scroll += 1
+                logger.info(
+                    f"DIAGNOSTICO: URLs rescatadas por scroll para "
+                    f"{url_registro}: {len(urls_pdf)}"
+                )
+                return urls_pdf[:5]
+
             logger.debug(
-                f"Primer pase vacio para {url_limpia}, intentando segundo "
-                "pase con espera de enlaces de descarga reales"
+                f"Post-scroll vacio para {url_limpia}, intentando "
+                "reintento AJAX (4s)"
             )
             try:
                 pagina.wait_for_selector(
@@ -563,15 +615,15 @@ class ILOLabordocScraper(BaseScraper):
             if urls_pdf:
                 self.diag_con_pdf_segundo_intento += 1
                 logger.info(
-                    f"DIAGNOSTICO: enlaces capturados en segundo intento "
-                    f"(AJAX tardio detectado): {url_limpia}"
+                    f"DIAGNOSTICO: enlaces capturados en reintento AJAX "
+                    f"post-scroll: {url_limpia}"
                 )
                 return urls_pdf[:5]
 
             self.diag_sin_pdf_tras_reintento += 1
             logger.info(
-                f"DIAGNOSTICO: selector presente pero sin enlaces extraibles "
-                f"despues de reintento: {url_limpia}"
+                f"DIAGNOSTICO: sin enlaces extraibles despues de scroll "
+                f"y reintento: {url_limpia}"
             )
             self._dump_html_zona_servicios(pagina, url_limpia)
             return []
