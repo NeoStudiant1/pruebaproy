@@ -117,7 +117,7 @@ python main.py
 3. **Configurar filtros:**
    - Palabras clave (obligatorio): Escribe los terminos separados por coma.
      Ejemplo: `climate change, sustainable development`
-   - Rango de fechas: Anio desde y anio hasta (opcional).
+   - Rango de fechas: Fecha desde y fecha hasta (opcional).
    - Idioma: Codigo de dos letras (en, es, fr, ar, zh, ru) o dejar vacio.
    - Tipo de documento: reporte, resolucion, acuerdo, decision, carta.
    - Limite de documentos: Por defecto 50. Maximo recomendado 200.
@@ -133,8 +133,8 @@ python main.py
 
 ```
   Palabras clave (separadas por coma): child labour, forced labour
-  Anio desde (ej: 2015): 2020
-  Anio hasta (ej: 2024): 2024
+  Fecha desde (ej: 2015): 2020
+  Fecha hasta (ej: 2024): 2024
   Codigo de idioma (ej: es): en
   Tipo de documento: reporte
   Numero maximo de documentos (default: 50): 10
@@ -146,21 +146,69 @@ python main.py
 | Archivo | Descripcion |
 |---------|-------------|
 | `documentos_descargados/*.pdf` | Los PDFs descargados |
-| `documentos_descargados/metadata.csv` | Metadatos en formato CSV |
+| `documentos_descargados/metadata.csv` | Metadatos en formato CSV (tabular, para Excel/Sheets) |
+| `documentos_descargados/metadata.json` | Metadatos en formato JSON (estructurado, con texto completo) |
+| `documentos_descargados/textos_extraidos.txt` | Texto consolidado de todos los PDFs descargados |
 | `errores.log` | Log detallado de la sesion (para depuracion) |
 
-### Formato del CSV de metadatos
+### Formato de los metadatos (CSV y JSON)
 
-El archivo `metadata.csv` contiene las columnas:
-- titulo
-- autor
-- anio
-- idioma
-- tipo_documento
-- url_fuente
-- archivo_local (nombre del PDF o "DESCARGA_FALLIDA")
+Ambos archivos contienen los mismos campos para cada documento:
+- `titulo`
+- `autor`
+- `fecha` — fecha de publicacion del documento
+- `idioma`
+- `tipo_documento`
+- `url_fuente`
+- `archivo_local` — nombre del PDF o "DESCARGA_FALLIDA"
+- `fecha_descarga` — momento exacto de la descarga, formato ISO 8601 (ej: `2026-04-21T15:42:31`)
+- `texto_extraido` — contenido textual del PDF
 
-Se puede abrir con Excel, Google Sheets o cualquier editor de texto.
+**Diferencia importante entre CSV y JSON:**
+- En el `metadata.csv`, el campo `texto_extraido` se TRUNCA a los primeros 500
+  caracteres seguido de un indicador, para que el archivo se pueda abrir comodamente
+  en Excel sin que las celdas se vuelvan ilegibles.
+- En el `metadata.json`, el campo `texto_extraido` contiene el texto COMPLETO sin
+  truncar. Es la fuente canonica del contenido textual.
+
+El `metadata.csv` se genera con pandas. El `metadata.json` es mas conveniente
+para procesar los datos desde otros programas o scripts.
+
+### Archivo de textos consolidado (`textos_extraidos.txt`)
+
+Contiene el texto extraido de todos los PDFs en un solo archivo, separados
+por encabezados claros que indican el archivo, titulo, fecha de publicacion
+y fecha de descarga de cada documento:
+
+```
+======================================================================
+DOCUMENTO 1 de 15
+ARCHIVO:           ILO_alma995339593202676_Issue_paper.pdf
+TITULO:            Issue paper on child labour and climate change
+FECHA PUBLICACION: 2023
+FECHA DESCARGA:    2026-04-21T15:42:31
+======================================================================
+
+[texto del PDF aqui]
+
+```
+
+### PDFs sin texto extraible (escaneados)
+
+Algunos PDFs son escaneos de documentos en papel: contienen imagenes en lugar
+de texto digital. Estos no se pueden leer con extraccion simple.
+
+Cuando el programa detecta un PDF asi, el campo `texto_extraido` muestra:
+`[PDF SIN CAPA DE TEXTO - OCR REQUERIDO]`
+
+El PDF queda descargado correctamente, simplemente no se le puede sacar texto
+sin un proceso adicional de OCR (reconocimiento optico de caracteres). Esto
+podria agregarse en una version futura del programa si fuera necesario.
+
+Otros marcadores que pueden aparecer en `texto_extraido`:
+- `[PDF VACIO O SIN CONTENIDO TEXTUAL]` — el PDF no tenia paginas con texto
+- `[ERROR AL LEER EL PDF]` — el archivo estaba corrupto o protegido
+- `[ARCHIVO NO DESCARGADO]` — la descarga del PDF fallo
 
 
 ## Solucion de problemas
@@ -229,8 +277,8 @@ El archivo `configuracion.json` se crea automaticamente la primera vez que
 ejecutas el programa. Contiene parametros que puedes cambiar sin tocar
 codigo Python:
 
-- `anio_minimo_permitido`: anio mas antiguo que el programa acepta (default: 1945).
-- `anio_maximo_permitido`: anio mas reciente que el programa acepta (default: 2026).
+- `fecha_minima_permitida`: fecha mas antigua que el programa acepta (default: 1945).
+- `fecha_maxima_permitida`: fecha mas reciente que el programa acepta (default: 2026).
 - `carpeta_descarga_por_defecto`: carpeta donde se guardan los PDFs.
 - `limite_documentos_por_defecto`: cuantos documentos buscar como maximo.
 - `ultima_carpeta_usada`: se actualiza automaticamente con la ultima carpeta elegida.
@@ -243,23 +291,23 @@ el programa mostrara un mensaje de error claro indicando que linea tiene el
 problema, y seguira funcionando con valores por defecto.
 
 
-## Como ampliar el rango de anos (por ejemplo, para usar el programa en 2027)
+## Como ampliar el rango de fechas (por ejemplo, para usar el programa en 2027)
 
-El programa valida que los anos ingresados esten dentro de un rango permitido.
-Por defecto, el ano maximo es 2026. Si necesitas buscar documentos de 2027
-en adelante, sigue estos pasos:
+El programa valida que las fechas ingresadas esten dentro de un rango
+permitido. Por defecto, la fecha maxima es 2026. Si necesitas buscar
+documentos de 2027 en adelante, sigue estos pasos:
 
 1. Abre el archivo `configuracion.json` con el Bloc de notas (Windows)
    o cualquier editor de texto.
 
 2. Busca la linea que dice:
-       "anio_maximo_permitido": 2026,
+       "fecha_maxima_permitida": 2026,
 
-3. Cambia el numero 2026 por el ano que necesites, por ejemplo:
-       "anio_maximo_permitido": 2027,
+3. Cambia el numero 2026 por la fecha que necesites, por ejemplo:
+       "fecha_maxima_permitida": 2027,
 
 4. Guarda el archivo y cierra el Bloc de notas. La proxima vez que
-   ejecutes el programa, aceptara anos hasta 2027.
+   ejecutes el programa, aceptara fechas hasta 2027.
 
 IMPORTANTE: no borres las comillas, las comas ni las llaves del archivo.
 Si el programa muestra un error al iniciar, revisa que el formato sea

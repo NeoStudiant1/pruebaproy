@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import List, Optional
 
 from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
-
 FORMATO_LOG = (
     "--- %(asctime)s ---\n"
     "Nivel: %(levelname)s\n"
@@ -24,6 +23,7 @@ FORMATO_CONSOLA = "%(message)s"
 def configurar_logging():
     logger_raiz = logging.getLogger()
     logger_raiz.setLevel(logging.DEBUG)
+
     logger_raiz.handlers.clear()
 
     handler_archivo = logging.FileHandler("errores.log", mode="w", encoding="utf-8")
@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 
 def obtener_scrapers_disponibles() -> List[dict]:
-    scrapers = []
 
     try:
         from scraper_un import UNDigitalLibraryScraper
@@ -65,15 +64,14 @@ def obtener_scrapers_disponibles() -> List[dict]:
 
     return scrapers
 
-
 import json
 
 RUTA_CONFIGURACION = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "configuracion.json")
 
 CONFIGURACION_POR_DEFECTO = {
-    "anio_minimo_permitido": 1945,
-    "anio_maximo_permitido": 2026,
+    "fecha_minima_permitida": 1945,
+    "fecha_maxima_permitida": 2026,
     "carpeta_descarga_por_defecto": "./documentos_descargados",
     "limite_documentos_por_defecto": 50,
     "ultima_carpeta_usada": None,
@@ -221,32 +219,32 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
             break
         print("  Las palabras clave son obligatorias. Escribe al menos un termino.")
 
-    anio_min = CONFIG.get("anio_minimo_permitido", 1945)
-    anio_max = CONFIG.get("anio_maximo_permitido", 2026)
+    fecha_min = CONFIG.get("fecha_minima_permitida", 1945)
+    fecha_max = CONFIG.get("fecha_maxima_permitida", 2026)
     print()
-    anio_desde = input(f"  Anio desde ({anio_min}-{anio_max}): ").strip()
-    if anio_desde:
+    fecha_desde = input(f"  Fecha desde ({fecha_min}-{fecha_max}): ").strip()
+    if fecha_desde:
         try:
-            valor = int(anio_desde)
-            if valor < anio_min or valor > anio_max:
-                print(f"  Valor fuera del rango permitido ({anio_min}-{anio_max}). "
+            valor = int(fecha_desde)
+            if valor < fecha_min or valor > fecha_max:
+                print(f"  Valor fuera del rango permitido ({fecha_min}-{fecha_max}). "
                       "Se omite el filtro.")
             else:
-                filtros.anio_desde = valor
+                filtros.fecha_desde = valor
         except ValueError:
-            print("  Valor no valido. Se omite el filtro de anio inicial.")
+            print("  Valor no valido. Se omite el filtro de fecha inicial.")
 
-    anio_hasta = input(f"  Anio hasta ({anio_min}-{anio_max}): ").strip()
-    if anio_hasta:
+    fecha_hasta = input(f"  Fecha hasta ({fecha_min}-{fecha_max}): ").strip()
+    if fecha_hasta:
         try:
-            valor = int(anio_hasta)
-            if valor < anio_min or valor > anio_max:
-                print(f"  Valor fuera del rango permitido ({anio_min}-{anio_max}). "
+            valor = int(fecha_hasta)
+            if valor < fecha_min or valor > fecha_max:
+                print(f"  Valor fuera del rango permitido ({fecha_min}-{fecha_max}). "
                       "Se omite el filtro.")
             else:
-                filtros.anio_hasta = valor
+                filtros.fecha_hasta = valor
         except ValueError:
-            print("  Valor no valido. Se omite el filtro de anio final.")
+            print("  Valor no valido. Se omite el filtro de fecha final.")
 
     idiomas_cfg = CONFIG.get("idiomas_validos", {})
     print()
@@ -289,14 +287,14 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
                 print(f"  Valor no valido. Se usara el limite por defecto ({limite_default}).")
                 limite = limite_default
 
-            if limite > 200:
+            if limite > 100:
                 print()
                 print(f"  ATENCION: Descargar {limite} documentos puede tardar varios minutos")
                 print("  y generar un volumen considerable de trafico de red.")
                 confirmacion = input("  Deseas continuar con este limite? (s/n): ").strip().lower()
                 if confirmacion != "s":
-                    print("  Se usara el limite de 200 documentos.")
-                    limite = 200
+                    print("  Se usara el limite de 100 documentos.")
+                    limite = 100
 
             filtros.limite = limite
         except ValueError:
@@ -365,8 +363,8 @@ def confirmar_busqueda(filtros: FiltrosBusqueda, nombre_fuente: str) -> bool:
     print("-" * 50)
     print(f"  Fuente:            {nombre_fuente}")
     print(f"  Palabras clave:    {', '.join(filtros.palabras_clave)}")
-    print(f"  Anio desde:        {filtros.anio_desde or 'Sin limite'}")
-    print(f"  Anio hasta:        {filtros.anio_hasta or 'Sin limite'}")
+    print(f"  Fecha desde:       {filtros.fecha_desde or 'Sin limite'}")
+    print(f"  Fecha hasta:       {filtros.fecha_hasta or 'Sin limite'}")
     print(f"  Idioma:            {', '.join(filtros.idioma) if filtros.idioma else 'Todos'}")
     print(f"  Tipo de documento: {filtros.tipo_documento or 'Cualquiera'}")
     print(f"  Limite:            {filtros.limite} documentos")
@@ -413,37 +411,41 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
         print(f"  Descargando documento {i} de {len(resultados)}: {doc.titulo[:60]}...")
 
         ruta = scraper.download(doc, carpeta_destino)
+        fecha_descarga_iso = datetime.now().replace(microsecond=0).isoformat()
 
         if ruta:
             exitosos += 1
-            archivos_descargados.append({
-                "titulo": doc.titulo,
-                "autor": doc.autor,
-                "anio": doc.anio,
-                "idioma": doc.idioma,
-                "tipo_documento": doc.tipo_documento,
-                "url_fuente": doc.url_fuente,
-                "archivo_local": os.path.basename(ruta),
-            })
+            archivo_local = os.path.basename(ruta)
+            texto_extraido = extraer_texto_pdf(ruta)
         else:
             fallidos += 1
-            archivos_descargados.append({
-                "titulo": doc.titulo,
-                "autor": doc.autor,
-                "anio": doc.anio,
-                "idioma": doc.idioma,
-                "tipo_documento": doc.tipo_documento,
-                "url_fuente": doc.url_fuente,
-                "archivo_local": "DESCARGA_FALLIDA",
-            })
+            archivo_local = "DESCARGA_FALLIDA"
+            texto_extraido = TEXTO_NO_DESCARGADO
+
+        archivos_descargados.append({
+            "titulo": doc.titulo,
+            "autor": doc.autor,
+            "fecha": doc.fecha,
+            "idioma": doc.idioma,
+            "tipo_documento": doc.tipo_documento,
+            "url_fuente": doc.url_fuente,
+            "archivo_local": archivo_local,
+            "fecha_descarga": fecha_descarga_iso,
+            "texto_extraido": texto_extraido,
+        })
 
         if i < len(resultados):
             time.sleep(1)
 
     tiempo_descarga = time.time() - inicio_descarga
 
+    
     ruta_csv = os.path.join(carpeta_destino, "metadata.csv")
+    ruta_json = os.path.join(carpeta_destino, "metadata.json")
+    ruta_textos = os.path.join(carpeta_destino, "textos_extraidos.txt")
     generar_csv_metadatos(archivos_descargados, ruta_csv)
+    generar_json_metadatos(archivos_descargados, ruta_json)
+    generar_archivo_textos_consolidado(archivos_descargados, ruta_textos)
 
     print()
     print("=" * 50)
@@ -455,7 +457,9 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
     print(f"  Tiempo de busqueda:              {tiempo_busqueda:.1f}s")
     print(f"  Tiempo de descarga:              {tiempo_descarga:.1f}s")
     print(f"  Archivos guardados en:           {os.path.abspath(carpeta_destino)}")
-    print(f"  Metadatos exportados en:         {os.path.abspath(ruta_csv)}")
+    print(f"  Metadatos CSV:                   {os.path.abspath(ruta_csv)}")
+    print(f"  Metadatos JSON:                  {os.path.abspath(ruta_json)}")
+    print(f"  Textos extraidos:                {os.path.abspath(ruta_textos)}")
     print("=" * 50)
 
     if fallidos > 0:
@@ -469,18 +473,132 @@ def generar_csv_metadatos(datos: List[dict], ruta_csv: str):
     if not datos:
         return
 
-    campos = ["titulo", "autor", "anio", "idioma", "tipo_documento", "url_fuente", "archivo_local"]
+    campos = ["titulo", "autor", "fecha", "idioma", "tipo_documento",
+              "url_fuente", "archivo_local", "fecha_descarga", "texto_extraido"]
+
+    datos_para_csv = []
+    for registro in datos:
+        copia = dict(registro)
+        copia["texto_extraido"] = truncar_texto_para_csv(
+            registro.get("texto_extraido", "")
+        )
+        datos_para_csv.append(copia)
 
     try:
-        with open(ruta_csv, "w", newline="", encoding="utf-8-sig") as f:
-            escritor = csv.DictWriter(f, fieldnames=campos)
-            escritor.writeheader()
-            for fila in datos:
-                escritor.writerow(fila)
-        logger.info(f"CSV de metadatos generado: {ruta_csv}")
+        import pandas as pd
+        df = pd.DataFrame(datos_para_csv, columns=campos)
+        df.to_csv(ruta_csv, index=False, encoding="utf-8-sig")
+        logger.info(f"CSV de metadatos generado con pandas: {ruta_csv}")
+    except ImportError:
+        logger.warning("pandas no disponible, usando csv.DictWriter como fallback")
+        try:
+            with open(ruta_csv, "w", newline="", encoding="utf-8-sig") as f:
+                escritor = csv.DictWriter(f, fieldnames=campos)
+                escritor.writeheader()
+                for fila in datos_para_csv:
+                    escritor.writerow(fila)
+            logger.info(f"CSV de metadatos generado (fallback): {ruta_csv}")
+        except Exception as e:
+            logger.error(f"Error al generar CSV: {e}", exc_info=True)
+            print(f"  Error al generar el archivo de metadatos CSV: {e}")
     except Exception as e:
-        logger.error(f"Error al generar CSV de metadatos: {e}", exc_info=True)
-        print(f"  Error al generar el archivo de metadatos: {e}")
+        logger.error(f"Error al generar CSV con pandas: {e}", exc_info=True)
+        print(f"  Error al generar el archivo de metadatos CSV: {e}")
+
+
+def generar_json_metadatos(datos: List[dict], ruta_json: str):
+    if not datos:
+        return
+
+    try:
+        with open(ruta_json, "w", encoding="utf-8") as f:
+            json.dump(datos, f, indent=2, ensure_ascii=False)
+        logger.info(f"JSON de metadatos generado: {ruta_json}")
+    except Exception as e:
+        logger.error(f"Error al generar JSON de metadatos: {e}", exc_info=True)
+        print(f"  Error al generar el archivo de metadatos JSON: {e}")
+
+
+MAX_CHARS_TEXTO_EN_CSV = 500
+
+TEXTO_OCR_REQUERIDO = "[PDF SIN CAPA DE TEXTO - OCR REQUERIDO]"
+TEXTO_VACIO = "[PDF VACIO O SIN CONTENIDO TEXTUAL]"
+TEXTO_ERROR_LECTURA = "[ERROR AL LEER EL PDF]"
+TEXTO_NO_DESCARGADO = "[ARCHIVO NO DESCARGADO]"
+
+
+def extraer_texto_pdf(ruta_pdf: str) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        logger.warning("pypdf no esta instalado. No se extraera texto.")
+        return TEXTO_ERROR_LECTURA
+
+    if not os.path.isfile(ruta_pdf):
+        return TEXTO_NO_DESCARGADO
+
+    try:
+        reader = PdfReader(ruta_pdf)
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception:
+                pass
+
+        partes_texto = []
+        for pagina in reader.pages:
+            try:
+                texto_pagina = pagina.extract_text() or ""
+                if texto_pagina.strip():
+                    partes_texto.append(texto_pagina)
+            except Exception as e:
+                logger.debug(f"Pagina ilegible en {ruta_pdf}: {e}")
+                continue
+
+        texto_total = "\n".join(partes_texto).strip()
+
+        if not texto_total:
+            return TEXTO_OCR_REQUERIDO
+
+        return texto_total
+
+    except Exception as e:
+        logger.warning(f"Error extrayendo texto de {ruta_pdf}: {e}")
+        return TEXTO_ERROR_LECTURA
+
+
+def truncar_texto_para_csv(texto: str, limite: int = MAX_CHARS_TEXTO_EN_CSV) -> str:
+    if not texto:
+        return ""
+    if texto.startswith("[") and texto.endswith("]"):
+        return texto
+    if len(texto) <= limite:
+        return texto
+    return texto[:limite].rstrip() + f"... [TRUNCADO - texto completo en metadata.json, {len(texto)} caracteres totales]"
+
+
+def generar_archivo_textos_consolidado(datos: List[dict], ruta_archivo: str):
+    if not datos:
+        return
+
+    try:
+        with open(ruta_archivo, "w", encoding="utf-8") as f:
+            for i, registro in enumerate(datos, 1):
+                separador = "=" * 70
+                f.write(separador + "\n")
+                f.write(f"DOCUMENTO {i} de {len(datos)}\n")
+                f.write(f"ARCHIVO:           {registro.get('archivo_local', '?')}\n")
+                f.write(f"TITULO:            {registro.get('titulo', '?')}\n")
+                f.write(f"FECHA PUBLICACION: {registro.get('fecha', '?')}\n")
+                f.write(f"FECHA DESCARGA:    {registro.get('fecha_descarga', '?')}\n")
+                f.write(separador + "\n\n")
+                texto = registro.get("texto_extraido", "") or ""
+                f.write(texto)
+                f.write("\n\n\n")
+        logger.info(f"Archivo de textos consolidado generado: {ruta_archivo}")
+    except Exception as e:
+        logger.error(f"Error al generar archivo de textos: {e}", exc_info=True)
+        print(f"  Error al generar el archivo de textos consolidado: {e}")
 
 
 def diagnostico():
@@ -510,6 +628,22 @@ def diagnostico():
         print("  [ERROR] lxml no esta instalado")
         print("          Ejecuta: pip install lxml")
         todo_ok = False
+
+    try:
+        import pandas as pd
+        print(f"  [OK] pandas {pd.__version__}")
+    except ImportError:
+        print("  [AVISO] pandas no esta instalado")
+        print("          Sin pandas el CSV se genera con un fallback de la stdlib.")
+        print("          Para mejor manejo de datos: pip install pandas")
+
+    try:
+        import pypdf
+        print(f"  [OK] pypdf {pypdf.__version__}")
+    except ImportError:
+        print("  [AVISO] pypdf no esta instalado")
+        print("          Sin pypdf no se podra extraer texto de los PDFs.")
+        print("          Ejecuta: pip install pypdf")
 
     try:
         import playwright
