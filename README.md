@@ -4,6 +4,22 @@ Herramienta de linea de comandos para buscar y descargar documentos PDF
 desde la Biblioteca Digital de Naciones Unidas (UN Digital Library) y el
 repositorio Labordoc de la Organizacion Internacional del Trabajo (OIT).
 
+
+## Estructura del proyecto
+
+```
+proyecto_scraper/
+    main.py              <- Punto de entrada. Menu interactivo.
+    base_scraper.py      <- Clase base abstracta (interfaz comun).
+    scraper_un.py        <- Scraper para UN Digital Library.
+    scraper_ilo.py       <- Scraper para ILO Labordoc (API REST + Playwright).
+    configuracion.json   <- Parametros editables sin tocar codigo.
+    requirements.txt     <- Dependencias de Python.
+    ROADMAP.md           <- Plan de desarrollo por tandas.
+    README.md            <- Este archivo.
+```
+
+
 ## Requisitos previos
 
 - Python 3.9 o superior

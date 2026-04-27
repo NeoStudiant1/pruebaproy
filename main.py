@@ -1,4 +1,15 @@
 # -*- coding: utf-8 -*-
+"""
+Punto de entrada del programa.
+
+Presenta un menu interactivo en consola que guia al usuario para buscar
+y descargar documentos de bibliotecas digitales (UN Digital Library e
+ILO Labordoc), extraer texto de los PDFs descargados, generar metadatos
+en CSV y JSON, y mantener un historial acumulado entre sesiones.
+
+Uso:
+    python main.py
+"""
 
 import os
 import sys
@@ -10,6 +21,13 @@ from datetime import datetime
 from typing import List, Optional
 
 from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
+
+# ===========================================================================
+# CONFIGURACION DE LOGGING
+# ===========================================================================
+
+# El log se imprime en bloques con cabecera para que sea facil distinguir
+# eventos en errores.log al inspeccionarlo manualmente.
 FORMATO_LOG = (
     "--- %(asctime)s ---\n"
     "Nivel: %(levelname)s\n"
@@ -21,9 +39,12 @@ FORMATO_CONSOLA = "%(message)s"
 
 
 def configurar_logging():
+    """Configura dos destinos para el log: archivo errores.log (todo,
+    nivel DEBUG) y consola (solo WARNING y superior, formato simple)."""
     logger_raiz = logging.getLogger()
     logger_raiz.setLevel(logging.DEBUG)
 
+    # Limpiar handlers previos por si la funcion se invocara mas de una vez
     logger_raiz.handlers.clear()
 
     handler_archivo = logging.FileHandler("errores.log", mode="w", encoding="utf-8")
@@ -40,7 +61,16 @@ def configurar_logging():
 logger = logging.getLogger(__name__)
 
 
+# ===========================================================================
+# REGISTRO DE SCRAPERS DISPONIBLES
+# ===========================================================================
+# Para agregar una nueva fuente, basta crear una subclase de BaseScraper y
+# registrarla aqui. El menu la lista automaticamente. Las importaciones se
+# protegen con try/except para que un scraper roto no impida usar el resto.
+
 def obtener_scrapers_disponibles() -> List[dict]:
+    """Retorna la lista de scrapers cargados correctamente. Cada entrada
+    es un dict con las claves nombre, descripcion y clase."""
     scrapers = []
 
     try:
@@ -64,6 +94,15 @@ def obtener_scrapers_disponibles() -> List[dict]:
         logger.warning(f"No se pudo cargar scraper ILO: {e}")
 
     return scrapers
+
+
+# ===========================================================================
+# CONFIGURACION DESDE ARCHIVO JSON
+# ===========================================================================
+# configuracion.json deja editar parametros (rangos de fechas, idiomas
+# validos, carpeta por defecto, etc.) sin tocar codigo. Si el archivo no
+# existe se crea con valores por defecto; si esta corrupto el programa
+# avisa al usuario y continua con los valores por defecto en memoria.
 
 import json
 
@@ -90,6 +129,10 @@ CONFIGURACION_POR_DEFECTO = {
 
 
 def cargar_configuracion() -> dict:
+    """Lee configuracion.json y devuelve sus valores fusionados con los
+    defaults. Si el archivo no existe se crea con los defaults; si esta
+    corrupto se avisa al usuario y se siguen usando los defaults en
+    memoria sin abortar el programa."""
     config = dict(CONFIGURACION_POR_DEFECTO)
 
     if not os.path.exists(RUTA_CONFIGURACION):
@@ -107,6 +150,8 @@ def cargar_configuracion() -> dict:
             datos = json.load(f)
         if not isinstance(datos, dict):
             raise ValueError("El contenido no es un objeto JSON valido")
+        # Los valores del archivo prevalecen, pero las claves ausentes se
+        # rellenan con los defaults para que no falte ningun campo.
         config.update(datos)
     except json.JSONDecodeError as e:
         print()
@@ -134,6 +179,7 @@ def cargar_configuracion() -> dict:
 
 
 def guardar_configuracion(config: dict):
+    """Persiste el dict de configuracion al archivo JSON."""
     try:
         with open(RUTA_CONFIGURACION, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
@@ -147,6 +193,17 @@ CARPETA_DESCARGA = CONFIG.get("carpeta_descarga_por_defecto",
                                "./documentos_descargados")
 
 
+# ===========================================================================
+# HISTORIAL DE DESCARGAS (DETECCION DE DUPLICADOS ENTRE SESIONES)
+# ===========================================================================
+# historial_descargas.json acumula informacion de cada documento que el
+# programa intento descargar, sea con exito o fallo. Sirve para dos fines:
+# saltar archivos ya descargados en sesiones previas, y no reintentar
+# descargas que ya fallaron antes (a menudo por documentos sin PDF
+# disponible). La identidad de un documento es su recid prefijado con la
+# fuente, p.ej. 'ILO:alma995...' o 'UN:4012345', para evitar colisiones
+# entre numeraciones de scrapers distintos.
+
 RUTA_HISTORIAL = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "historial_descargas.json"
@@ -157,6 +214,15 @@ ESTADO_FALLIDO = "fallido"
 
 
 def cargar_historial() -> dict:
+    """Lee historial_descargas.json y devuelve su contenido. Si no existe
+    devuelve una estructura vacia; si esta corrupto avisa al usuario y
+    devuelve la estructura vacia, de modo que el programa pueda seguir
+    operando aunque sin deteccion de duplicados hasta que el archivo se
+    arregle o se borre.
+
+    La estructura es {version, actualizado, descargas{id_unico: {...}}};
+    cada entrada de descargas contiene fuente, titulo, url_fuente,
+    fecha_publicacion, fecha_descarga, ruta_archivo y estado."""
     historial_vacio = {
         "version": 1,
         "actualizado": None,
@@ -171,6 +237,7 @@ def cargar_historial() -> dict:
             datos = json.load(f)
         if not isinstance(datos, dict):
             raise ValueError("El contenido no es un objeto JSON valido")
+        # Tolerancia con archivos de versiones anteriores
         if "descargas" not in datos or not isinstance(datos["descargas"], dict):
             datos["descargas"] = {}
         if "version" not in datos:
@@ -195,6 +262,7 @@ def cargar_historial() -> dict:
 
 
 def guardar_historial(historial: dict):
+    """Persiste el historial al disco con timestamp actualizado."""
     try:
         historial["actualizado"] = datetime.now().replace(microsecond=0).isoformat()
         with open(RUTA_HISTORIAL, "w", encoding="utf-8") as f:
@@ -206,6 +274,11 @@ def guardar_historial(historial: dict):
 
 
 def ids_excluir_desde_historial(historial: dict) -> set:
+    """Conjunto de identificadores a saltar en la proxima busqueda.
+
+    Incluye registros exitosos y fallidos: una descarga que fallo en una
+    sesion previa probablemente seguira fallando (p. ej., porque el
+    documento no tiene PDF), por lo que no se reintenta."""
     descargas = historial.get("descargas", {})
     if not isinstance(descargas, dict):
         return set()
@@ -213,12 +286,21 @@ def ids_excluir_desde_historial(historial: dict) -> set:
 
 
 def registrar_en_historial(historial: dict, id_unico: str, registro: dict):
+    """Agrega una entrada al historial en memoria.
+
+    El volcado a disco lo realiza guardar_historial() al cerrar la
+    sesion; mantenerlo en memoria evita el coste de I/O por cada
+    descarga individual."""
     if "descargas" not in historial:
         historial["descargas"] = {}
     historial["descargas"][id_unico] = registro
 
 
 def construir_id_unico(fuente: str, recid: str) -> Optional[str]:
+    """Devuelve el identificador prefijado por fuente, o None si el recid
+    es vacio. El prefijo se infiere del nombre legible de la fuente: 'ILO'
+    para Labordoc, 'UN' para UN Digital Library, y las tres primeras
+    letras en mayusculas para fuentes futuras no contempladas aqui."""
     if not recid:
         return None
     prefijo_upper = fuente.upper()
@@ -231,11 +313,17 @@ def construir_id_unico(fuente: str, recid: str) -> Optional[str]:
     return f"{prefijo}:{recid}"
 
 
+# ===========================================================================
+# FUNCIONES DEL MENU INTERACTIVO
+# ===========================================================================
+
 def limpiar_pantalla():
+    """Limpia la pantalla de la consola."""
     os.system("cls" if os.name == "nt" else "clear")
 
 
 def mostrar_encabezado():
+    """Muestra el titulo del programa."""
     print("=" * 65)
     print("  DESCARGADOR DE DOCUMENTOS - BIBLIOTECAS DIGITALES")
     print("  UN Digital Library | ILO Labordoc")
@@ -244,6 +332,7 @@ def mostrar_encabezado():
 
 
 def mostrar_menu_principal():
+    """Muestra el menu principal y retorna la opcion seleccionada."""
     print("  Opciones disponibles:")
     print()
     print("  [1] Buscar y descargar documentos")
@@ -259,6 +348,9 @@ def mostrar_menu_principal():
 
 
 def seleccionar_fuente(scrapers: List[dict]) -> Optional[BaseScraper]:
+    """Pide al usuario que elija una fuente del listado y devuelve una
+    instancia del scraper correspondiente. Devuelve None si el usuario
+    decide volver al menu principal."""
     print()
     print("-" * 50)
     print("  PASO 1: Selecciona la fuente de datos")
@@ -288,6 +380,9 @@ def seleccionar_fuente(scrapers: List[dict]) -> Optional[BaseScraper]:
 
 
 def configurar_filtros() -> Optional[FiltrosBusqueda]:
+    """Guia al usuario por el formulario de filtros y devuelve el objeto
+    FiltrosBusqueda construido. Cualquier filtro distinto de la palabra
+    clave puede dejarse en blanco para omitirlo."""
     filtros = FiltrosBusqueda()
 
     print()
@@ -297,13 +392,15 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     print("  (Deja en blanco para omitir un filtro)")
     print()
 
+    # --- Palabras clave (obligatorio) ---
     while True:
-        entrada = input("  Palabras clave (separadas por coma): ").strip()
+        entrada = input("  Palabra clave (Max 1 palabra): ").strip()
         if entrada:
             filtros.palabras_clave = [p.strip() for p in entrada.split(",") if p.strip()]
             break
-        print("  Las palabras clave son obligatorias. Escribe al menos un termino.")
+        print("  La palabra clave es obligatoria. Escribe un termino para buscar.")
 
+    # --- Rango de fechas ---
     fecha_min = CONFIG.get("fecha_minima_permitida", 1945)
     fecha_max = CONFIG.get("fecha_maxima_permitida", 2026)
     print()
@@ -331,9 +428,10 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
         except ValueError:
             print("  Valor no valido. Se omite el filtro de fecha final.")
 
+    # --- Idioma ---
     idiomas_cfg = CONFIG.get("idiomas_validos", {})
     print()
-    print("  Idiomas disponibles (puedes elegir varios separados por coma):")
+    print("  Idiomas disponibles (Max 2 idiomas, separados por coma):")
     pares = [f"    {cod} = {nombre}" for cod, nombre in idiomas_cfg.items()]
     for par in pares:
         print(par)
@@ -355,6 +453,7 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
         else:
             print("  Ningun codigo reconocido. Se buscara en todos los idiomas.")
 
+    # --- Tipo de documento ---
     print()
     print("  Tipos de documento:")
     print("    reporte | resolucion | acuerdo | decision | carta")
@@ -362,9 +461,10 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     if tipo:
         filtros.tipo_documento = tipo
 
+    # --- Limite de documentos ---
     limite_default = CONFIG.get("limite_documentos_por_defecto", 50)
     print()
-    limite_str = input(f"  Numero maximo de documentos a descargar (default: {limite_default}): ").strip()
+    limite_str = input(f"  Numero de documentos a descargar (Max 100, default: {limite_default}): ").strip()
     if limite_str:
         try:
             limite = int(limite_str)
@@ -374,12 +474,9 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
 
             if limite > 100:
                 print()
-                print(f"  ATENCION: Descargar {limite} documentos puede tardar varios minutos")
-                print("  y generar un volumen considerable de trafico de red.")
-                confirmacion = input("  Deseas continuar con este limite? (s/n): ").strip().lower()
-                if confirmacion != "s":
-                    print("  Se usara el limite de 100 documentos.")
-                    limite = 100
+                print(f"  ATENCION: el limite maximo es 100 documentos.")
+                print(f"  Se usara el limite maximo (100) en vez del valor ingresado ({limite}).")
+                limite = 100
 
             filtros.limite = limite
         except ValueError:
@@ -388,6 +485,7 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     else:
         filtros.limite = limite_default
 
+    # --- Carpeta de destino (selector grafico con tkinter) ---
     carpeta_default = CONFIG.get("ultima_carpeta_usada") or CARPETA_DESCARGA
     print()
     print(f"  Carpeta de descarga actual: {carpeta_default}")
@@ -396,6 +494,7 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     if cambiar == "s":
         carpeta = _seleccionar_carpeta_grafica(carpeta_default)
         if carpeta:
+            # Guardar la ultima carpeta elegida en configuracion.json
             CONFIG["ultima_carpeta_usada"] = carpeta
             guardar_configuracion(CONFIG)
         else:
@@ -407,10 +506,15 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
 
 
 def _seleccionar_carpeta_grafica(carpeta_inicial: str) -> Optional[str]:
+    """Abre el dialogo nativo de seleccion de carpeta (tkinter). Si el
+    entorno no tiene interfaz grafica o el dialogo falla, recurre a
+    pedir la ruta por teclado. Devuelve la ruta elegida, o None si el
+    usuario cancela."""
     try:
         import tkinter as tk
         from tkinter import filedialog
 
+        # Ventana raiz oculta para que solo aparezca el dialogo
         root = tk.Tk()
         root.withdraw()
 
@@ -442,6 +546,7 @@ def _seleccionar_carpeta_grafica(carpeta_inicial: str) -> Optional[str]:
 
 
 def confirmar_busqueda(filtros: FiltrosBusqueda, nombre_fuente: str) -> bool:
+    """Muestra el resumen de los filtros y pide confirmacion al usuario."""
     print()
     print("-" * 50)
     print("  RESUMEN DE LA BUSQUEDA")
@@ -462,8 +567,13 @@ def confirmar_busqueda(filtros: FiltrosBusqueda, nombre_fuente: str) -> bool:
 
 def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
                                   carpeta_destino: str):
+    """Orquesta la busqueda, descarga, extraccion de texto y volcado de
+    metadatos. Carga el historial al inicio para excluir duplicados,
+    extiende el historial con los resultados de la sesion y lo persiste
+    al final."""
     os.makedirs(carpeta_destino, exist_ok=True)
 
+    # --- FASE 1: Busqueda ---
     print()
     print("  Buscando documentos...")
     print("  (Esto puede tomar unos segundos dependiendo de la fuente)")
@@ -496,13 +606,15 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
     print(f"  Se encontraron {len(resultados)} documentos en {tiempo_busqueda:.1f} segundos.")
     print()
 
+    # --- FASE 2: Descarga ---
     print("  Iniciando descarga de PDFs...")
     print()
 
     exitosos = 0
     fallidos = 0
-    archivos_descargados = []  
+    archivos_descargados = []
     inicio_descarga = time.time()
+
     nombre_fuente = scraper.nombre_fuente()
 
     for i, doc in enumerate(resultados, 1):
@@ -510,6 +622,7 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
 
         ruta = scraper.download(doc, carpeta_destino)
 
+        # Sello temporal en cuanto termina la descarga, exitosa o no
         fecha_descarga_iso = datetime.now().replace(microsecond=0).isoformat()
 
         if ruta:
@@ -525,6 +638,8 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             texto_extraido = TEXTO_NO_DESCARGADO
             estado_descarga = ESTADO_FALLIDO
 
+        # Un solo punto de construccion para que CSV, JSON y archivo
+        # consolidado reciban exactamente los mismos campos.
         archivos_descargados.append({
             "titulo": doc.titulo,
             "autor": doc.autor,
@@ -537,6 +652,10 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             "texto_extraido": texto_extraido,
         })
 
+        # Si el recid esta vacio el documento no se puede identificar
+        # univocamente, asi que no entra al historial; podria volver a
+        # aparecer en sesiones futuras pero esto es preferible a usar un
+        # ID falso que entrarie en colision con otros.
         id_unico = construir_id_unico(nombre_fuente, doc.recid)
         if id_unico:
             registrar_en_historial(historial, id_unico, {
@@ -549,11 +668,13 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
                 "estado": estado_descarga,
             })
 
+        # Pausa entre descargas para ser respetuoso con el servidor
         if i < len(resultados):
             time.sleep(1)
 
     tiempo_descarga = time.time() - inicio_descarga
 
+    # --- FASE 3: Generar archivos de salida (CSV + JSON + textos consolidados) ---
     ruta_csv = os.path.join(carpeta_destino, "metadata.csv")
     ruta_json = os.path.join(carpeta_destino, "metadata.json")
     ruta_textos = os.path.join(carpeta_destino, "textos_extraidos.txt")
@@ -561,8 +682,12 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
     generar_json_metadatos(archivos_descargados, ruta_json)
     generar_archivo_textos_consolidado(archivos_descargados, ruta_textos)
 
+    # Persistir al final en lugar de tras cada descarga: ahorra I/O en
+    # el bucle. En caso de crash se pierde solo el historial de la
+    # sesion actual; el de sesiones previas no se ve afectado.
     guardar_historial(historial)
 
+    # --- FASE 4: Resumen final ---
     print()
     print("=" * 50)
     print("  RESUMEN DE LA SESION")
@@ -589,12 +714,21 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
 
 
 def generar_csv_metadatos(datos: List[dict], ruta_csv: str):
+    """Vuelca los metadatos a un archivo CSV abrible directamente en Excel.
+
+    Usa pandas como camino principal y csv.DictWriter como respaldo si
+    la dependencia no esta instalada. El campo texto_extraido se trunca
+    a MAX_CHARS_TEXTO_EN_CSV caracteres para no convertir las celdas en
+    bloques ilegibles; el texto integro queda en metadata.json y en
+    textos_extraidos.txt."""
     if not datos:
         return
 
     campos = ["titulo", "autor", "fecha", "idioma", "tipo_documento",
               "url_fuente", "archivo_local", "fecha_descarga", "texto_extraido"]
 
+    # Trabajamos sobre copia para no mutar la lista original que tambien
+    # alimenta el JSON y el archivo consolidado, donde el texto va completo.
     datos_para_csv = []
     for registro in datos:
         copia = dict(registro)
@@ -604,6 +738,7 @@ def generar_csv_metadatos(datos: List[dict], ruta_csv: str):
         datos_para_csv.append(copia)
 
     try:
+        # encoding utf-8-sig agrega BOM para que Excel no rompa los acentos
         import pandas as pd
         df = pd.DataFrame(datos_para_csv, columns=campos)
         df.to_csv(ruta_csv, index=False, encoding="utf-8-sig")
@@ -626,6 +761,9 @@ def generar_csv_metadatos(datos: List[dict], ruta_csv: str):
 
 
 def generar_json_metadatos(datos: List[dict], ruta_json: str):
+    """Vuelca los metadatos a JSON conservando el texto integro de cada
+    documento. Es la fuente canonica del contenido textual cuando se
+    quiere procesar la salida con otros programas."""
     if not datos:
         return
 
@@ -638,6 +776,14 @@ def generar_json_metadatos(datos: List[dict], ruta_json: str):
         print(f"  Error al generar el archivo de metadatos JSON: {e}")
 
 
+# ===========================================================================
+# EXTRACCION DE TEXTO DE PDFs
+# ===========================================================================
+# El texto se obtiene con pypdf. Si el PDF no tiene capa de texto (caso
+# tipico de documentos escaneados como imagenes), se marca como
+# 'OCR REQUERIDO' en lugar de intentar reconocimiento optico, que
+# requeriria dependencias externas (Tesseract).
+
 MAX_CHARS_TEXTO_EN_CSV = 500
 
 TEXTO_OCR_REQUERIDO = "[PDF SIN CAPA DE TEXTO - OCR REQUERIDO]"
@@ -647,6 +793,10 @@ TEXTO_NO_DESCARGADO = "[ARCHIVO NO DESCARGADO]"
 
 
 def extraer_texto_pdf(ruta_pdf: str) -> str:
+    """Devuelve el texto contenido en un PDF, o un marcador entre
+    corchetes si la extraccion no es posible (PDF escaneado, corrupto,
+    archivo inexistente). pypdf se importa de forma perezosa para que la
+    ausencia de la dependencia no impida usar el resto del programa."""
     try:
         from pypdf import PdfReader
     except ImportError:
@@ -658,6 +808,8 @@ def extraer_texto_pdf(ruta_pdf: str) -> str:
 
     try:
         reader = PdfReader(ruta_pdf)
+        # Algunos PDFs vienen marcados como cifrados con clave vacia; el
+        # decrypt('') desbloquea ese caso comun sin penalizar al resto.
         if reader.is_encrypted:
             try:
                 reader.decrypt("")
@@ -671,12 +823,14 @@ def extraer_texto_pdf(ruta_pdf: str) -> str:
                 if texto_pagina.strip():
                     partes_texto.append(texto_pagina)
             except Exception as e:
+                # Una pagina ilegible no debe abortar la extraccion del resto
                 logger.debug(f"Pagina ilegible en {ruta_pdf}: {e}")
                 continue
 
         texto_total = "\n".join(partes_texto).strip()
 
         if not texto_total:
+            # Sin texto = casi siempre escaneado sin OCR previo
             return TEXTO_OCR_REQUERIDO
 
         return texto_total
@@ -687,6 +841,9 @@ def extraer_texto_pdf(ruta_pdf: str) -> str:
 
 
 def truncar_texto_para_csv(texto: str, limite: int = MAX_CHARS_TEXTO_EN_CSV) -> str:
+    """Devuelve el texto cortado al limite de caracteres y con un sufijo
+    explicativo cuando hubo truncamiento. Los marcadores entre corchetes
+    se devuelven sin tocar (ya son cortos por diseno)."""
     if not texto:
         return ""
     if texto.startswith("[") and texto.endswith("]"):
@@ -697,6 +854,11 @@ def truncar_texto_para_csv(texto: str, limite: int = MAX_CHARS_TEXTO_EN_CSV) -> 
 
 
 def generar_archivo_textos_consolidado(datos: List[dict], ruta_archivo: str):
+    """Escribe en un unico .txt el texto de todos los PDFs descargados.
+
+    Cada bloque comienza con un encabezado que identifica el archivo,
+    titulo y fechas, de modo que el resultado se pueda leer en cualquier
+    editor de texto plano sin necesidad de procesarlo programaticamente."""
     if not datos:
         return
 
@@ -720,7 +882,14 @@ def generar_archivo_textos_consolidado(datos: List[dict], ruta_archivo: str):
         print(f"  Error al generar el archivo de textos consolidado: {e}")
 
 
+# ===========================================================================
+# DIAGNOSTICO DE DEPENDENCIAS
+# ===========================================================================
+
 def diagnostico():
+    """Comprueba el entorno de ejecucion y muestra el resultado al
+    usuario: dependencias Python, conectividad con las fuentes y estado
+    del historial."""
     print()
     print("-" * 50)
     print("  DIAGNOSTICO DE DEPENDENCIAS")
@@ -729,9 +898,11 @@ def diagnostico():
 
     todo_ok = True
 
+    # Python
     version_python = sys.version.split()[0]
     print(f"  [OK] Python {version_python}")
 
+    # requests
     try:
         import requests
         print(f"  [OK] requests {requests.__version__}")
@@ -740,6 +911,7 @@ def diagnostico():
         print("          Ejecuta: pip install requests")
         todo_ok = False
 
+    # lxml
     try:
         from lxml import etree
         print(f"  [OK] lxml {etree.__version__}")
@@ -748,6 +920,7 @@ def diagnostico():
         print("          Ejecuta: pip install lxml")
         todo_ok = False
 
+    # pandas (para CSV de metadata)
     try:
         import pandas as pd
         print(f"  [OK] pandas {pd.__version__}")
@@ -756,6 +929,7 @@ def diagnostico():
         print("          Sin pandas el CSV se genera con un fallback de la stdlib.")
         print("          Para mejor manejo de datos: pip install pandas")
 
+    # pypdf (para extraccion de texto de PDFs)
     try:
         import pypdf
         print(f"  [OK] pypdf {pypdf.__version__}")
@@ -764,8 +938,10 @@ def diagnostico():
         print("          Sin pypdf no se podra extraer texto de los PDFs.")
         print("          Ejecuta: pip install pypdf")
 
+    # playwright
     try:
         import playwright
+        # Obtener version de forma segura (no todas las versiones exponen __version__)
         try:
             from importlib.metadata import version as pkg_version
             version_pw = pkg_version("playwright")
@@ -773,6 +949,7 @@ def diagnostico():
             version_pw = "(version desconocida)"
         print(f"  [OK] playwright {version_pw}")
 
+        # Verificar que los navegadores esten instalados
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as pw:
@@ -790,6 +967,7 @@ def diagnostico():
         print("          Luego:   playwright install chromium")
         todo_ok = False
 
+    # Verificar acceso a red (UN Digital Library)
     print()
     print("  Verificando conectividad...")
     try:
@@ -808,6 +986,7 @@ def diagnostico():
         print("  [ERROR] No se pudo conectar a ILO Labordoc")
         todo_ok = False
 
+    # Informacion del historial acumulado (no bloqueante)
     print()
     print("  Historial de descargas:")
     try:
@@ -829,6 +1008,7 @@ def diagnostico():
     except Exception as e:
         print(f"  [AVISO] No se pudo leer el historial: {e}")
 
+    # Resumen
     print()
     if todo_ok:
         print("  Todo esta correctamente configurado.")
@@ -841,7 +1021,12 @@ def diagnostico():
     input("  Presiona Enter para volver al menu principal...")
 
 
+# ===========================================================================
+# BUCLE PRINCIPAL
+# ===========================================================================
+
 def main():
+    """Punto de entrada principal del programa."""
     configurar_logging()
     logger.info("Programa iniciado")
 
@@ -885,3 +1070,69 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ===========================================================================
+# COMO AGREGAR UNA NUEVA FUENTE
+# ===========================================================================
+#
+# Sigue estos 5 pasos para integrar una nueva biblioteca digital:
+#
+# PASO 1: Crea un nuevo archivo (ej: scraper_nueva_fuente.py)
+#   - Importa BaseScraper, DocumentoResultado y FiltrosBusqueda desde base_scraper.py
+#   - Crea una clase que herede de BaseScraper
+#
+# PASO 2: Implementa los 3 metodos obligatorios:
+#   - nombre_fuente() -> str
+#       Retorna el nombre legible de la fuente (ej: "Nueva Biblioteca")
+#
+#   - search(filtros: FiltrosBusqueda) -> List[DocumentoResultado]
+#       Realiza la busqueda y retorna una lista de DocumentoResultado.
+#       Cada resultado debe tener al menos: titulo, url_fuente, urls_descarga.
+#       Usa logging para registrar errores y progreso.
+#
+#   - download(documento, carpeta_destino, intentos_max=3) -> Optional[str]
+#       Descarga el PDF al disco. Retorna la ruta del archivo o None si falla.
+#       Implementa reintentos (ver scraper_un.py como ejemplo).
+#
+# PASO 3: Registra el nuevo scraper en main.py
+#   - Ve a la funcion obtener_scrapers_disponibles()
+#   - Agrega un bloque try/except similar a los existentes:
+#
+#       try:
+#           from scraper_nueva_fuente import NuevaFuenteScraper
+#           scrapers.append({
+#               "nombre": "Nueva Biblioteca",
+#               "descripcion": "Descripcion breve de la fuente",
+#               "clase": NuevaFuenteScraper,
+#           })
+#       except ImportError as e:
+#           logger.warning(f"No se pudo cargar scraper nueva fuente: {e}")
+#
+# PASO 4: Prueba tu scraper
+#   - Ejecuta el diagnostico (opcion 2 del menu) para verificar dependencias
+#   - Haz una busqueda simple con 5-10 documentos para validar
+#   - Revisa errores.log para detectar problemas
+#
+# PASO 5: Documenta tu scraper
+#   - Agrega docstrings en la clase y metodos explicando la estrategia
+#   - Documenta los endpoints/APIs que utiliza
+#   - Indica si requiere dependencias adicionales en requirements.txt
+#
+# Ejemplo minimo de un scraper:
+#
+#   from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
+#   from typing import List, Optional
+#
+#   class NuevaFuenteScraper(BaseScraper):
+#       def nombre_fuente(self) -> str:
+#           return "Nueva Fuente"
+#
+#       def search(self, filtros: FiltrosBusqueda) -> List[DocumentoResultado]:
+#           # Tu logica de busqueda aqui
+#           return []
+#
+#       def download(self, documento: DocumentoResultado, carpeta_destino: str,
+#                    intentos_max: int = 3) -> Optional[str]:
+#           # Tu logica de descarga aqui
+#           return None
