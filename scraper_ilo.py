@@ -16,8 +16,25 @@ BASE_URL = "https://labordoc.ilo.org"
 
 VID = "41ILO_INST:41ILO_V2"
 
-SEARCH_SCOPE = "ALL_ILO"
-TAB = "ALL_ILO"
+def _leer_config_ilo():
+    import json as _json
+    _defaults = {"ilo_search_scope": "ALL_ILO", "ilo_tab": "ALL_ILO"}
+    _ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "configuracion.json")
+    try:
+        with open(_ruta, "r", encoding="utf-8") as _f:
+            _datos = _json.load(_f)
+        return {
+            "scope": _datos.get("ilo_search_scope", _defaults["ilo_search_scope"]),
+            "tab": _datos.get("ilo_tab", _defaults["ilo_tab"]),
+        }
+    except Exception:
+        return {"scope": _defaults["ilo_search_scope"],
+                "tab": _defaults["ilo_tab"]}
+
+_CFG_ILO = _leer_config_ilo()
+SEARCH_SCOPE = _CFG_ILO["scope"]
+TAB = _CFG_ILO["tab"]
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1005,7 +1022,7 @@ class ILOLabordocScraper(BaseScraper):
                     )
                     respuesta = requests.get(
                         url,
-                        timeout=(10, 120), 
+                        timeout=(10, 120),  
                         stream=True,
                         allow_redirects=True,
                         headers={"User-Agent": USER_AGENT}

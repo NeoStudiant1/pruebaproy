@@ -43,7 +43,7 @@ MAPA_TIPOS_DOCUMENTO = {
 
 PATRONES_URL_IGNORADAS = [
     "/thumbnail/",    
-    "ignoredefault", 
+    "ignoredefault",  
     ".css", ".js", ".png", ".jpg", ".gif", ".svg", ".ico",
     "google.com", "facebook.com", "twitter.com",
     "piwik.php",      

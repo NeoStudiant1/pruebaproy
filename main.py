@@ -66,7 +66,86 @@ def obtener_scrapers_disponibles() -> List[dict]:
     return scrapers
 
 
-CARPETA_DESCARGA = "./documentos_descargados"
+import json
+
+RUTA_CONFIGURACION = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "configuracion.json")
+
+CONFIGURACION_POR_DEFECTO = {
+    "anio_minimo_permitido": 1945,
+    "anio_maximo_permitido": 2026,
+    "carpeta_descarga_por_defecto": "./documentos_descargados",
+    "limite_documentos_por_defecto": 50,
+    "ultima_carpeta_usada": None,
+    "ilo_search_scope": "ALL_ILO",
+    "ilo_tab": "ALL_ILO",
+    "idiomas_validos": {
+        "en": "Ingles",
+        "es": "Espanol",
+        "fr": "Frances",
+        "ar": "Arabe",
+        "zh": "Chino",
+        "ru": "Ruso",
+    },
+}
+
+
+def cargar_configuracion() -> dict:
+    config = dict(CONFIGURACION_POR_DEFECTO)
+
+    if not os.path.exists(RUTA_CONFIGURACION):
+        try:
+            with open(RUTA_CONFIGURACION, "w", encoding="utf-8") as f:
+                json.dump(CONFIGURACION_POR_DEFECTO, f,
+                         indent=4, ensure_ascii=False)
+            print(f"  Archivo de configuracion creado: {RUTA_CONFIGURACION}")
+        except Exception as e:
+            print(f"  No se pudo crear configuracion.json: {e}")
+        return config
+
+    try:
+        with open(RUTA_CONFIGURACION, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+        if not isinstance(datos, dict):
+            raise ValueError("El contenido no es un objeto JSON valido")
+        config.update(datos)
+    except json.JSONDecodeError as e:
+        print()
+        print("  " + "=" * 56)
+        print("  ERROR AL LEER configuracion.json")
+        print("  " + "=" * 56)
+        print(f"  El archivo tiene un error de formato en la linea {e.lineno}:")
+        print(f"    {e.msg}")
+        print()
+        print("  Para arreglarlo:")
+        print(f"    1. Abre el archivo con el Bloc de notas:")
+        print(f"       {RUTA_CONFIGURACION}")
+        print("    2. Revisa que todas las comas, comillas y llaves esten bien.")
+        print("    3. Si no puedes arreglarlo, borra el archivo y el programa")
+        print("       lo creara de nuevo con los valores por defecto.")
+        print()
+        print("  Por ahora se usaran los valores por defecto.")
+        print("  " + "=" * 56)
+        print()
+    except Exception as e:
+        print(f"  Error leyendo configuracion.json: {e}")
+        print("  Se usaran los valores por defecto.")
+
+    return config
+
+
+def guardar_configuracion(config: dict):
+    try:
+        with open(RUTA_CONFIGURACION, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"No se pudo guardar configuracion.json: {e}")
+
+
+CONFIG = cargar_configuracion()
+
+CARPETA_DESCARGA = CONFIG.get("carpeta_descarga_por_defecto",
+                               "./documentos_descargados")
 
 
 def limpiar_pantalla():
@@ -97,6 +176,7 @@ def mostrar_menu_principal():
 
 
 def seleccionar_fuente(scrapers: List[dict]) -> Optional[BaseScraper]:
+    print()
     print("-" * 50)
     print("  PASO 1: Selecciona la fuente de datos")
     print("-" * 50)
@@ -133,6 +213,7 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     print("-" * 50)
     print("  (Deja en blanco para omitir un filtro)")
     print()
+
     while True:
         entrada = input("  Palabras clave (separadas por coma): ").strip()
         if entrada:
@@ -140,30 +221,56 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
             break
         print("  Las palabras clave son obligatorias. Escribe al menos un termino.")
 
+    anio_min = CONFIG.get("anio_minimo_permitido", 1945)
+    anio_max = CONFIG.get("anio_maximo_permitido", 2026)
     print()
-    anio_desde = input("  Año desde (ej: 2015): ").strip()
+    anio_desde = input(f"  Anio desde ({anio_min}-{anio_max}): ").strip()
     if anio_desde:
         try:
-            filtros.anio_desde = int(anio_desde)
+            valor = int(anio_desde)
+            if valor < anio_min or valor > anio_max:
+                print(f"  Valor fuera del rango permitido ({anio_min}-{anio_max}). "
+                      "Se omite el filtro.")
+            else:
+                filtros.anio_desde = valor
         except ValueError:
-            print("  Valor no valido. Se omite el filtro de año inicial.")
+            print("  Valor no valido. Se omite el filtro de anio inicial.")
 
-    anio_hasta = input("  Año hasta (ej: 2024): ").strip()
+    anio_hasta = input(f"  Anio hasta ({anio_min}-{anio_max}): ").strip()
     if anio_hasta:
         try:
-            filtros.anio_hasta = int(anio_hasta)
+            valor = int(anio_hasta)
+            if valor < anio_min or valor > anio_max:
+                print(f"  Valor fuera del rango permitido ({anio_min}-{anio_max}). "
+                      "Se omite el filtro.")
+            else:
+                filtros.anio_hasta = valor
         except ValueError:
-            print("  Valor no valido. Se omite el filtro de año final.")
+            print("  Valor no valido. Se omite el filtro de anio final.")
 
+    idiomas_cfg = CONFIG.get("idiomas_validos", {})
     print()
-    print("  Idiomas disponibles:")
-    print("    en = Ingles | es = Espanol | fr = Frances")
-    print("    ar = Arabe  | zh = Chino   | ru = Ruso")
-    idioma = input("  Codigo de idioma (ej: es): ").strip().lower()
-    if idioma in ("en", "es", "fr", "ar", "zh", "ru"):
-        filtros.idioma = idioma
-    elif idioma:
-        print("  Codigo no reconocido. Se buscara en todos los idiomas.")
+    print("  Idiomas disponibles (puedes elegir varios separados por coma):")
+    pares = [f"    {cod} = {nombre}" for cod, nombre in idiomas_cfg.items()]
+    for par in pares:
+        print(par)
+    idioma_input = input("  Codigo(s) de idioma (ej: es, en): ").strip().lower()
+    if idioma_input:
+        idiomas = [c.strip() for c in idioma_input.split(",") if c.strip()]
+        idiomas_ok = []
+        idiomas_rechazados = []
+        for c in idiomas:
+            if c in idiomas_cfg:
+                idiomas_ok.append(c)
+            else:
+                idiomas_rechazados.append(c)
+        if idiomas_rechazados:
+            print(f"  Codigo(s) no reconocido(s): {', '.join(idiomas_rechazados)}. "
+                  "Se ignoran.")
+        if idiomas_ok:
+            filtros.idioma = idiomas_ok
+        else:
+            print("  Ningun codigo reconocido. Se buscara en todos los idiomas.")
 
     print()
     print("  Tipos de documento:")
@@ -172,14 +279,15 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
     if tipo:
         filtros.tipo_documento = tipo
 
+    limite_default = CONFIG.get("limite_documentos_por_defecto", 50)
     print()
-    limite_str = input(f"  Numero maximo de documentos a descargar (default: 50): ").strip()
+    limite_str = input(f"  Numero maximo de documentos a descargar (default: {limite_default}): ").strip()
     if limite_str:
         try:
             limite = int(limite_str)
             if limite <= 0:
-                print("  Valor no valido. Se usara el limite por defecto (50).")
-                limite = 50
+                print(f"  Valor no valido. Se usara el limite por defecto ({limite_default}).")
+                limite = limite_default
 
             if limite > 200:
                 print()
@@ -192,14 +300,61 @@ def configurar_filtros() -> Optional[FiltrosBusqueda]:
 
             filtros.limite = limite
         except ValueError:
-            print("  Valor no valido. Se usara el limite por defecto (50).")
-
+            print(f"  Valor no valido. Se usara el limite por defecto ({limite_default}).")
+            filtros.limite = limite_default
+    else:
+        filtros.limite = limite_default
+    carpeta_default = CONFIG.get("ultima_carpeta_usada") or CARPETA_DESCARGA
     print()
-    carpeta = input(f"  Carpeta de descarga (default: {CARPETA_DESCARGA}): ").strip()
-    if not carpeta:
-        carpeta = CARPETA_DESCARGA
+    print(f"  Carpeta de descarga actual: {carpeta_default}")
+    cambiar = input("  Deseas cambiar la carpeta de descarga? (s/n): ").strip().lower()
+
+    if cambiar == "s":
+        carpeta = _seleccionar_carpeta_grafica(carpeta_default)
+        if carpeta:
+            CONFIG["ultima_carpeta_usada"] = carpeta
+            guardar_configuracion(CONFIG)
+        else:
+            carpeta = carpeta_default
+    else:
+        carpeta = carpeta_default
 
     return filtros, carpeta
+
+
+def _seleccionar_carpeta_grafica(carpeta_inicial: str) -> Optional[str]:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+
+        directorio_inicio = carpeta_inicial if os.path.isdir(carpeta_inicial) else "."
+
+        carpeta = filedialog.askdirectory(
+            title="Selecciona la carpeta de descarga",
+            initialdir=directorio_inicio,
+        )
+
+        root.destroy()
+
+        if carpeta:
+            print(f"  Carpeta seleccionada: {carpeta}")
+            return carpeta
+        else:
+            print("  Seleccion cancelada. Se usara la carpeta por defecto.")
+            return None
+
+    except ImportError:
+        print("  El selector grafico no esta disponible en este sistema.")
+        print("  Escribe la ruta de la carpeta manualmente.")
+    except Exception as e:
+        print(f"  No se pudo abrir el selector grafico: {e}")
+        print("  Escribe la ruta de la carpeta manualmente.")
+
+    ruta = input(f"  Carpeta de descarga (Enter para '{carpeta_inicial}'): ").strip()
+    return ruta if ruta else None
 
 
 def confirmar_busqueda(filtros: FiltrosBusqueda, nombre_fuente: str) -> bool:
@@ -209,9 +364,9 @@ def confirmar_busqueda(filtros: FiltrosBusqueda, nombre_fuente: str) -> bool:
     print("-" * 50)
     print(f"  Fuente:            {nombre_fuente}")
     print(f"  Palabras clave:    {', '.join(filtros.palabras_clave)}")
-    print(f"  Año desde:        {filtros.anio_desde or 'Sin limite'}")
-    print(f"  Año hasta:        {filtros.anio_hasta or 'Sin limite'}")
-    print(f"  Idioma:            {filtros.idioma or 'Todos'}")
+    print(f"  Anio desde:        {filtros.anio_desde or 'Sin limite'}")
+    print(f"  Anio hasta:        {filtros.anio_hasta or 'Sin limite'}")
+    print(f"  Idioma:            {', '.join(filtros.idioma) if filtros.idioma else 'Todos'}")
     print(f"  Tipo de documento: {filtros.tipo_documento or 'Cualquiera'}")
     print(f"  Limite:            {filtros.limite} documentos")
     print("-" * 50)
@@ -263,7 +418,7 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             archivos_descargados.append({
                 "titulo": doc.titulo,
                 "autor": doc.autor,
-                "año": doc.anio,
+                "anio": doc.anio,
                 "idioma": doc.idioma,
                 "tipo_documento": doc.tipo_documento,
                 "url_fuente": doc.url_fuente,
@@ -274,7 +429,7 @@ def ejecutar_busqueda_y_descarga(scraper: BaseScraper, filtros: FiltrosBusqueda,
             archivos_descargados.append({
                 "titulo": doc.titulo,
                 "autor": doc.autor,
-                "año": doc.anio,
+                "anio": doc.anio,
                 "idioma": doc.idioma,
                 "tipo_documento": doc.tipo_documento,
                 "url_fuente": doc.url_fuente,
@@ -313,7 +468,7 @@ def generar_csv_metadatos(datos: List[dict], ruta_csv: str):
     if not datos:
         return
 
-    campos = ["titulo", "autor", "año", "idioma", "tipo_documento", "url_fuente", "archivo_local"]
+    campos = ["titulo", "autor", "anio", "idioma", "tipo_documento", "url_fuente", "archivo_local"]
 
     try:
         with open(ruta_csv, "w", newline="", encoding="utf-8-sig") as f:

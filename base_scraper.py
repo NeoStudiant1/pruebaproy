@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -25,7 +26,7 @@ class FiltrosBusqueda:
     palabras_clave: List[str] = field(default_factory=list)
     anio_desde: Optional[int] = None
     anio_hasta: Optional[int] = None
-    idioma: Optional[str] = None
+    idioma: Optional[List[str]] = None
     tipo_documento: Optional[str] = None
     limite: int = 50
 

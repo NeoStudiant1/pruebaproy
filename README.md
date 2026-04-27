@@ -117,7 +117,7 @@ python main.py
 3. **Configurar filtros:**
    - Palabras clave (obligatorio): Escribe los terminos separados por coma.
      Ejemplo: `climate change, sustainable development`
-   - Rango de fechas: Año desde y año hasta (opcional).
+   - Rango de fechas: Anio desde y anio hasta (opcional).
    - Idioma: Codigo de dos letras (en, es, fr, ar, zh, ru) o dejar vacio.
    - Tipo de documento: reporte, resolucion, acuerdo, decision, carta.
    - Limite de documentos: Por defecto 50. Maximo recomendado 200.
@@ -221,3 +221,47 @@ Consulta las instrucciones detalladas al final de `main.py` en la seccion
 3. Registra el scraper en `obtener_scrapers_disponibles()` dentro de `main.py`
 4. Prueba con una busqueda pequena
 5. Documenta la estrategia y dependencias
+
+
+## Archivo de configuracion (configuracion.json)
+
+El archivo `configuracion.json` se crea automaticamente la primera vez que
+ejecutas el programa. Contiene parametros que puedes cambiar sin tocar
+codigo Python:
+
+- `anio_minimo_permitido`: anio mas antiguo que el programa acepta (default: 1945).
+- `anio_maximo_permitido`: anio mas reciente que el programa acepta (default: 2026).
+- `carpeta_descarga_por_defecto`: carpeta donde se guardan los PDFs.
+- `limite_documentos_por_defecto`: cuantos documentos buscar como maximo.
+- `ultima_carpeta_usada`: se actualiza automaticamente con la ultima carpeta elegida.
+- `ilo_search_scope`: scope de busqueda de ILO Labordoc (default: ALL_ILO).
+- `ilo_tab`: tab de busqueda de ILO Labordoc (default: ALL_ILO).
+- `idiomas_validos`: codigos de idioma reconocidos y sus nombres en espanol.
+
+Si el archivo se corrompe (por ejemplo, si se borra una coma o una comilla),
+el programa mostrara un mensaje de error claro indicando que linea tiene el
+problema, y seguira funcionando con valores por defecto.
+
+
+## Como ampliar el rango de anos (por ejemplo, para usar el programa en 2027)
+
+El programa valida que los anos ingresados esten dentro de un rango permitido.
+Por defecto, el ano maximo es 2026. Si necesitas buscar documentos de 2027
+en adelante, sigue estos pasos:
+
+1. Abre el archivo `configuracion.json` con el Bloc de notas (Windows)
+   o cualquier editor de texto.
+
+2. Busca la linea que dice:
+       "anio_maximo_permitido": 2026,
+
+3. Cambia el numero 2026 por el ano que necesites, por ejemplo:
+       "anio_maximo_permitido": 2027,
+
+4. Guarda el archivo y cierra el Bloc de notas. La proxima vez que
+   ejecutes el programa, aceptara anos hasta 2027.
+
+IMPORTANTE: no borres las comillas, las comas ni las llaves del archivo.
+Si el programa muestra un error al iniciar, revisa que el formato sea
+correcto o borra el archivo `configuracion.json` para que se regenere
+con los valores por defecto.
