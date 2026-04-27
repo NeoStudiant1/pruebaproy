@@ -97,7 +97,6 @@ def mostrar_menu_principal():
 
 
 def seleccionar_fuente(scrapers: List[dict]) -> Optional[BaseScraper]:
-    print()
     print("-" * 50)
     print("  PASO 1: Selecciona la fuente de datos")
     print("-" * 50)

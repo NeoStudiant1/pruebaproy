@@ -43,7 +43,7 @@ MAPA_TIPOS_DOCUMENTO = {
 
 PATRONES_URL_IGNORADAS = [
     "/thumbnail/",    
-    "ignoredefault",  
+    "ignoredefault", 
     ".css", ".js", ".png", ".jpg", ".gif", ".svg", ".ico",
     "google.com", "facebook.com", "twitter.com",
     "piwik.php",      
@@ -118,6 +118,7 @@ def _imprimir_progreso(titulo_corto: str, descargados: int, total: int):
 
 
 class UNDigitalLibraryScraper(BaseScraper):
+
     REGISTROS_POR_PAGINA = 50
 
     def __init__(self):

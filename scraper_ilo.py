@@ -118,6 +118,7 @@ def _imprimir_progreso(titulo_corto: str, descargados: int, total: int):
 
 
 class ILOLabordocScraper(BaseScraper):
+
     RESULTADOS_POR_PAGINA = 10  
 
     def __init__(self):
@@ -1004,7 +1005,7 @@ class ILOLabordocScraper(BaseScraper):
                     )
                     respuesta = requests.get(
                         url,
-                        timeout=(10, 120),  
+                        timeout=(10, 120), 
                         stream=True,
                         allow_redirects=True,
                         headers={"User-Agent": USER_AGENT}
