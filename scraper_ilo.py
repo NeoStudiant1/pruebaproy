@@ -25,7 +25,7 @@ import sys
 import time
 import logging
 import requests
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 from base_scraper import BaseScraper, DocumentoResultado, FiltrosBusqueda
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,53 @@ MAPA_IDIOMAS_ILO = {
     "zh": "chi",
     "ru": "rus",
 }
+
+# Nombres de idioma en distintas ortografias que aparecen en los campos
+# packageName (edelivery) y label (representationInfo) de la API de Primo
+# VE. Cada nombre se mapea al codigo corto que usamos internamente.
+# Lista deliberadamente conservadora: solo entradas que son inequivocas.
+_NOMBRES_IDIOMA_A_CODIGO = {
+    "english": "en",
+    "spanish": "es",
+    "espanol": "es",
+    "espa\u00f1ol": "es",
+    "french": "fr",
+    "francais": "fr",
+    "fran\u00e7ais": "fr",
+    "arabic": "ar",
+    "chinese": "zh",
+    "russian": "ru",
+}
+
+
+def _inferir_idioma_desde_texto(texto: Optional[str]) -> Optional[str]:
+    """Intenta deducir el codigo de idioma desde un texto descriptivo.
+
+    La API de Primo VE entrega el idioma del PDF en campos de texto libre
+    como 'English - Full text' (en representationInfo.data.files[].label) o
+    'Francais' (en edelivery.electronicServices[].packageName), no como un
+    codigo estructurado. Esta funcion mapea esas variantes a los codigos
+    cortos del proyecto ('en', 'es', 'fr', 'ar', 'zh', 'ru').
+
+    El criterio es deliberadamente conservador: si el texto es vacio,
+    ambiguo (ej. 'Digital Version') o no contiene un nombre de idioma
+    reconocible, devuelve None. La logica de filtrado superior trata None
+    como 'no se puede determinar, dejar pasar', para no descartar
+    documentos legitimos por ausencia de metadata.
+    """
+    if not texto:
+        return None
+
+    # Normalizar: minusculas y comparacion como substring sobre cada
+    # nombre conocido. Se usa substring (no igualdad) porque los labels
+    # vienen en formato compuesto: "English - Full text", "Francais
+    # (resume)", etc.
+    texto_lower = texto.lower()
+    for nombre, codigo in _NOMBRES_IDIOMA_A_CODIGO.items():
+        if nombre in texto_lower:
+            return codigo
+    return None
+
 
 # Mapeo de tipos de documento a valores de rtype en Primo VE
 MAPA_TIPOS_ILO = {
@@ -445,7 +492,22 @@ class ILOLabordocScraper(BaseScraper):
                 if len(resultados) >= filtros.limite:
                     break
                 if doc.url_fuente:
-                    urls_pdf = self._obtener_url_pdf(pagina, doc.url_fuente)
+                    urls_pdf = self._obtener_url_pdf(
+                        pagina, doc.url_fuente, filtros.idioma
+                    )
+                    # Cuando el usuario pidio un filtro de idioma y el
+                    # documento no expone ningun PDF en los idiomas
+                    # solicitados, lo descartamos silenciosamente y
+                    # dejamos que la paginacion traiga otro candidato.
+                    # Mismo patron que el descarte por historial de la
+                    # Tanda 3: el bucle `while len(resultados) <
+                    # filtros.limite` ya pagina extra automaticamente.
+                    # Cuando filtros.idioma esta vacio, esta condicion
+                    # nunca se cumple y el comportamiento es identico al
+                    # previo (se preserva el doc aunque no tenga URLs
+                    # para que el download lo registre como fallido).
+                    if filtros.idioma and not urls_pdf:
+                        continue
                     doc.urls_descarga = urls_pdf
                 resultados.append(doc)
 
@@ -803,7 +865,9 @@ class ILOLabordocScraper(BaseScraper):
             )
             return None
 
-    def _extraer_urls_via_api_rest(self, docid: str) -> List[str]:
+    def _extraer_urls_via_api_rest(self, docid: str,
+                                    idiomas_pedidos: Optional[List[str]] = None
+                                    ) -> List[str]:
         """Devuelve las URLs S3 firmadas de los PDFs asociados al
         documento, consultando la API REST publica de Primo VE.
 
@@ -818,15 +882,31 @@ class ILOLabordocScraper(BaseScraper):
 
         Devuelve lista vacia si la API falla o el documento no tiene
         archivos descargables. El JWT guest se reutiliza entre llamadas
-        y se renueva automaticamente si el servidor responde 401."""
+        y se renueva automaticamente si el servidor responde 401.
+
+        Filtro de idioma (cuando idiomas_pedidos no es vacio):
+            Primo VE expone el idioma del PDF en campos de texto libre,
+            no en un campo estructurado. Usamos dos fuentes ya
+            disponibles en la cadena REST, por orden de prioridad:
+            (1) packageName de cada electronicService, y (2) label de
+            cada archivo dentro de representationInfo. Solo se descartan
+            archivos cuando alguno de esos textos identifica
+            inequivocamente un idioma distinto al pedido. Si ninguno de
+            los dos textos permite inferir un idioma reconocible, el
+            archivo pasa el filtro: la politica conservadora prefiere
+            colar algun documento sin metadata de idioma a descartar
+            documentos legitimos por ausencia de etiqueta.
+
+            Cuando idiomas_pedidos es None o vacio, el comportamiento es
+            identico al previo (sin filtrado, devuelve todo)."""
         jwt = self._obtener_jwt_invitado()
         if jwt is None:
             return []
 
         inst = VID.split(":")[0]  # '41ILO_INST'
 
-        ils_api_ids = self._llamar_edelivery(docid, jwt)
-        if ils_api_ids is None:
+        servicios = self._llamar_edelivery(docid, jwt)
+        if servicios is None:
             # JWT vencio: invalidamos el cache, lo renovamos y reintentamos
             logger.info("DIAGNOSTICO: JWT refrescado tras 401 en edelivery")
             self._jwt_invitado = None
@@ -834,15 +914,47 @@ class ILOLabordocScraper(BaseScraper):
             jwt = self._obtener_jwt_invitado()
             if jwt is None:
                 return []
-            ils_api_ids = self._llamar_edelivery(docid, jwt)
+            servicios = self._llamar_edelivery(docid, jwt)
 
-        if not ils_api_ids:
+        if not servicios:
             return []
 
+        # Normalizar la lista de idiomas pedidos a un set de codigos cortos
+        # para hacer comparaciones O(1).
+        idiomas_set = set(idiomas_pedidos) if idiomas_pedidos else set()
+
         urls_descarga: List[str] = []
-        for ils_id in ils_api_ids:
-            urls_files = self._llamar_representation_info(ils_id, jwt, inst)
-            urls_descarga.extend(urls_files)
+        descartados_por_idioma = 0
+        for ils_id, package_name in servicios:
+            # Filtro temprano: si el packageName del servicio identifica un
+            # idioma y no coincide con el pedido, evitamos la llamada a
+            # representationInfo. Esto ahorra requests para documentos cuyo
+            # idioma esta declarado a nivel de servicio (caso comun en los
+            # registros multilingues de Labordoc).
+            if idiomas_set:
+                idioma_pkg = _inferir_idioma_desde_texto(package_name)
+                if idioma_pkg is not None and idioma_pkg not in idiomas_set:
+                    descartados_por_idioma += 1
+                    continue
+
+            archivos = self._llamar_representation_info(ils_id, jwt, inst)
+            for download_url, label in archivos:
+                # Filtro tardio: si el label del archivo individual
+                # identifica un idioma y no coincide, descartar el archivo.
+                # Si el label esta vacio o es ambiguo, dejar pasar.
+                if idiomas_set:
+                    idioma_lbl = _inferir_idioma_desde_texto(label)
+                    if idioma_lbl is not None and idioma_lbl not in idiomas_set:
+                        descartados_por_idioma += 1
+                        continue
+                urls_descarga.append(download_url)
+
+        if descartados_por_idioma > 0:
+            logger.info(
+                f"DIAGNOSTICO: {descartados_por_idioma} URL(s) descartada(s) "
+                f"por filtro de idioma en docid={docid} "
+                f"(pedidos: {sorted(idiomas_set)})"
+            )
 
         # Deduplicar manteniendo el orden de aparicion
         urls_unicas = list(dict.fromkeys(urls_descarga))
@@ -855,10 +967,16 @@ class ILOLabordocScraper(BaseScraper):
 
         return urls_filtradas
 
-    def _llamar_edelivery(self, docid: str, jwt: str) -> Optional[List[str]]:
+    def _llamar_edelivery(self, docid: str, jwt: str
+                          ) -> Optional[List[Tuple[str, str]]]:
         """
         POST a /primaws/rest/pub/edelivery/{docid}.
-        Devuelve lista de ilsApiId para los servicios PDF descargables.
+        Devuelve lista de tuplas (ilsApiId, packageName) para los servicios
+        PDF descargables. El packageName se preserva porque la API de Primo
+        VE usa ese campo de texto como portador del idioma del PDF
+        (ej. 'English - Full text', 'Francais'); el caller lo necesita para
+        filtrar por idioma sin emitir requests adicionales.
+
         Devuelve None si recibe 401 (senal de JWT vencido para el caller).
         Devuelve lista vacia si no hay servicios o hay otro error.
         """
@@ -898,7 +1016,7 @@ class ILOLabordocScraper(BaseScraper):
         if not servicios:
             return []
 
-        ids = []
+        items: List[Tuple[str, str]] = []
         for svc in servicios:
             if not isinstance(svc, dict):
                 continue
@@ -915,15 +1033,20 @@ class ILOLabordocScraper(BaseScraper):
 
             ils_id = svc.get("ilsApiId")
             if ils_id:
-                ids.append(str(ils_id))
+                package_name = svc.get("packageName") or ""
+                items.append((str(ils_id), package_name))
 
-        return ids
+        return items
 
     def _llamar_representation_info(self, ils_api_id: str, jwt: str,
-                                     inst: str) -> List[str]:
+                                     inst: str) -> List[Tuple[str, str]]:
         """
         GET a /primaws/rest/priv/delivery/representationInfo?pid={ilsApiId}.
-        Devuelve lista de URLs S3 firmadas (downloadUrl) del array data.files.
+        Devuelve lista de tuplas (downloadUrl, label) del array data.files.
+        El label es texto descriptivo que tipicamente incluye el idioma
+        del PDF (ej. 'English - Full text', 'Espanol'); se preserva para
+        que el caller pueda filtrar por idioma sin requests adicionales.
+        Cuando el archivo no expone label se devuelve cadena vacia.
         """
         try:
             url_rep = (
@@ -958,7 +1081,7 @@ class ILOLabordocScraper(BaseScraper):
         if not isinstance(archivos, list):
             return []
 
-        urls = []
+        urls: List[Tuple[str, str]] = []
         for archivo in archivos:
             if not isinstance(archivo, dict):
                 continue
@@ -972,11 +1095,14 @@ class ILOLabordocScraper(BaseScraper):
 
             download_url = archivo.get("downloadUrl") or ""
             if download_url and download_url.startswith("http"):
-                urls.append(download_url)
+                label = archivo.get("label") or ""
+                urls.append((download_url, label))
 
         return urls
 
-    def _obtener_url_pdf(self, pagina, url_registro: str) -> List[str]:
+    def _obtener_url_pdf(self, pagina, url_registro: str,
+                          idiomas_pedidos: Optional[List[str]] = None
+                          ) -> List[str]:
         """Devuelve la lista de URLs de PDF asociadas a un documento.
 
         El camino preferente es la API REST de Primo VE (mas rapida y
@@ -987,7 +1113,15 @@ class ILOLabordocScraper(BaseScraper):
         VE realiza render diferido segun viewport), y por ultimo un
         reintento tras esperar a posibles AJAX tardios. Cada via
         incrementa contadores diagnosticos diferentes que alimentan el
-        resumen agregado de la busqueda."""
+        resumen agregado de la busqueda.
+
+        El parametro idiomas_pedidos se propaga unicamente al camino API
+        REST, que es donde se dispone de la metadata de idioma del PDF
+        sin requests adicionales. El camino Playwright extrae enlaces
+        del DOM y no recibe filtrado de idioma, ya que esos resultados
+        suelen ser excepcionales (la API REST cubre el caso del 93 al
+        100 por ciento) y los registros pasados por ese fallback se
+        validan con el filtro de URL de Primo VE."""
         self.diag_total_visitados += 1
 
         # ── PASO 0: API REST de Primo VE (Opcion 2a, camino principal) ──
@@ -996,7 +1130,7 @@ class ILOLabordocScraper(BaseScraper):
         # toda la danza de Playwright + scroll.
         docid = self._extraer_docid(url_registro)
         if docid:
-            urls_api = self._extraer_urls_via_api_rest(docid)
+            urls_api = self._extraer_urls_via_api_rest(docid, idiomas_pedidos)
             if urls_api:
                 self.diag_con_pdf_primer_intento += 1
                 self.diag_pdf_via_api_rest += 1
