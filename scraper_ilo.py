@@ -88,6 +88,8 @@ MAPA_IDIOMAS_ILO = {
     "ar": "ara",
     "zh": "chi",
     "ru": "rus",
+    "de": "ger",
+    "pt": "por",
 }
 
 # Nombres de idioma en distintas ortografias que aparecen en los campos
@@ -135,6 +137,165 @@ def _inferir_idioma_desde_texto(texto: Optional[str]) -> Optional[str]:
         if nombre in texto_lower:
             return codigo
     return None
+
+
+# Mapeo desde valores que aparecen en pnx.display.type y pnx.display.genre
+# del PNX de Primo VE hacia el enum de tipo_documento del proyecto. Cuando
+# un valor no encaja en ninguna categoria conocida se guarda como 'otro'
+# para mantener un dato util (la cadena cruda queda en metadatos_extra).
+# La comparacion siempre se hace en minusculas y eliminando guiones bajos.
+_MAPA_TIPO_PNX = {
+    # Reportes
+    "report": "reporte",
+    "reports": "reporte",
+    # Resoluciones
+    "resolution": "resolucion",
+    "resolutions": "resolucion",
+    # Acuerdos / tratados
+    "agreement": "acuerdo",
+    "agreements": "acuerdo",
+    "treaty": "acuerdo",
+    "treaties": "acuerdo",
+    # Libros y capitulos
+    "book": "libro",
+    "books": "libro",
+    "book chapter": "libro",
+    "book chapters": "libro",
+    # Articulos
+    "article": "articulo",
+    "articles": "articulo",
+    "journal article": "articulo",
+}
+
+
+def _normalizar_tipo(valor: str) -> str:
+    """Lowercase y reemplazo de '_' por espacio para alinear con la
+    convencion de _MAPA_TIPO_PNX (que guarda formas humanas)."""
+    return valor.replace("_", " ").strip().lower()
+
+
+def _mapear_tipo_documento_pnx(pnx_display: dict) -> Optional[str]:
+    """Determina el tipo_documento del proyecto a partir de pnx.display.
+
+    Lee primero pnx.display.type (que en Primo VE es un valor codificado:
+    'ResearchPaper', 'book_chapters', 'conference_proceeding', etc.) y,
+    si no encaja en el enum, prueba con pnx.display.genre (que trae
+    texto humano: 'research paper', 'resolution', 'ILO pub', etc.).
+
+    Devuelve el valor del enum (reporte/resolucion/acuerdo/libro/
+    articulo) o 'otro' si reconocio el valor pero queda fuera del enum,
+    o None si no encontro ningun campo legible.
+    """
+    # Recolectar candidatos
+    candidatos: List[str] = []
+    for clave in ("type", "genre"):
+        bruto = pnx_display.get(clave)
+        if isinstance(bruto, list):
+            for item in bruto:
+                if isinstance(item, str) and item.strip():
+                    candidatos.append(_normalizar_tipo(item))
+        elif isinstance(bruto, str) and bruto.strip():
+            candidatos.append(_normalizar_tipo(bruto))
+
+    if not candidatos:
+        return None
+
+    # Intentar mapeo directo a enum
+    for cand in candidatos:
+        if cand in _MAPA_TIPO_PNX:
+            return _MAPA_TIPO_PNX[cand]
+
+    # Reconocido pero fuera de enum (research paper, proceedings, etc.)
+    return "otro"
+
+
+def _mapear_idiomas_pnx(pnx_display: dict) -> List[str]:
+    """Lee pnx.display.language y devuelve la lista de codigos cortos
+    del proyecto (en/es/fr/...). El campo viene como una lista con un
+    unico string que puede tener uno o varios codigos MARC separados por
+    ';'. Por ejemplo: ['eng'] o ['eng;spa;por'] para registros
+    multilingues (caso comun en Labordoc).
+
+    Codigos MARC desconocidos se ignoran silenciosamente. Devuelve lista
+    vacia cuando el campo esta ausente o no contiene codigos
+    reconocibles, lo que el caller debe interpretar como 'sin
+    informacion' y no como 'idioma vacio'."""
+    bruto = pnx_display.get("language")
+    if not bruto:
+        return []
+    # Normalizar a string unico
+    if isinstance(bruto, list):
+        if not bruto:
+            return []
+    texto = bruto[0] if isinstance(bruto, list) else bruto
+    if not isinstance(texto, str):
+        return []
+
+    # Mapa inverso MARC -> codigo corto
+    inverso = {v: k for k, v in MAPA_IDIOMAS_ILO.items()}
+
+    codigos_marc = [c.strip().lower() for c in texto.split(";")]
+    cortos: List[str] = []
+    for marc in codigos_marc:
+        if marc in inverso:
+            cortos.append(inverso[marc])
+    # Deduplicar manteniendo orden
+    return list(dict.fromkeys(cortos))
+
+
+def _limpiar_autor_pnx(valor: object) -> str:
+    """Saca un autor presentable de un campo PNX que puede venir con
+    los marcadores internos de Primo VE.
+
+    Primo expone los autores en pnx.display.contributor / .creator con
+    el formato 'Nombre$$QNombre' (donde la parte despues de $$Q es la
+    forma para indizar). Tambien existen campos auxiliares con
+    sub-marcadores ($$C, $$V, $$T, $$X, $$Z). Esta funcion corta todo a
+    partir del primer '$$' y normaliza espacios.
+
+    El campo puede venir como string o lista. Cuando es lista, se
+    devuelven los nombres unicos unidos por '; ', mismo separador que
+    usa scraper_un para autores multiples."""
+    if valor is None:
+        return ""
+    items: List[str] = []
+    if isinstance(valor, list):
+        for item in valor:
+            if isinstance(item, str):
+                items.append(item)
+    elif isinstance(valor, str):
+        items.append(valor)
+
+    limpios: List[str] = []
+    for raw in items:
+        # Cortar en el primer separador interno de Primo
+        cortado = raw.split("$$")[0]
+        cortado = cortado.strip().rstrip(",;")
+        if cortado:
+            limpios.append(cortado)
+
+    # Deduplicar manteniendo orden
+    unicos = list(dict.fromkeys(limpios))
+    return "; ".join(unicos)
+
+
+def _extraer_anio_pnx(valor: object) -> str:
+    """Extrae el ano (4 digitos) del campo pnx.display.creationdate.
+
+    Primo lo suele entregar como ['2023'] o, en algunos casos,
+    ['2023-06-01']. Devolvemos solo el ano para alinearnos con el
+    comportamiento del scraper UN."""
+    if valor is None:
+        return ""
+    texto = ""
+    if isinstance(valor, list) and valor:
+        primero = valor[0]
+        if isinstance(primero, str):
+            texto = primero
+    elif isinstance(valor, str):
+        texto = valor
+    m = re.search(r"\b(\d{4})\b", texto)
+    return m.group(1) if m else ""
 
 
 # Mapeo de tipos de documento a valores de rtype en Primo VE
@@ -487,10 +648,66 @@ class ILOLabordocScraper(BaseScraper):
                     )
                 break
 
-            # Para cada documento NO excluido, intentar obtener la URL de descarga
+            # Para cada documento NO excluido, consultar PNX para
+            # rellenar metadatos bibliograficos (autor, fecha, idioma,
+            # tipo) e intentar obtener las URLs de descarga.
             for doc in docs_a_procesar:
                 if len(resultados) >= filtros.limite:
                     break
+
+                # ── Paso 1: consultar PNX siempre que tengamos docid ──
+                # El PNX expone metadatos que no estan disponibles en la
+                # cadena edelivery -> representationInfo. La consulta es
+                # tolerante a errores: si falla, devuelve dict vacio y el
+                # documento queda con los campos vacios como hoy.
+                meta_pnx: dict = {}
+                docid_doc = self._extraer_docid(doc.url_fuente or "")
+                if docid_doc:
+                    meta_pnx = self._consultar_pnx_para_metadatos(docid_doc)
+                    if meta_pnx:
+                        if meta_pnx.get("autor"):
+                            doc.autor = meta_pnx["autor"]
+                        if meta_pnx.get("fecha"):
+                            doc.fecha = meta_pnx["fecha"]
+                        if meta_pnx.get("tipo_documento"):
+                            doc.tipo_documento = meta_pnx["tipo_documento"]
+                        # Idioma: lista de codigos cortos. Para serializar
+                        # al CSV/JSON usamos el separador ';' que ya emplea
+                        # el propio PNX en el campo MARC original.
+                        idiomas_codigo = meta_pnx.get("idiomas_codigo") or []
+                        if idiomas_codigo:
+                            doc.idioma = ";".join(idiomas_codigo)
+
+                # ── Paso 2: filtro de idioma reforzado por PNX ──
+                # Linea de defensa adicional sobre el filtro existente
+                # de packageName/label, util sobre todo para documentos
+                # que entren por el camino Playwright (donde no hay otra
+                # validacion de idioma). Politica conservadora:
+                #   - Si filtros.idioma esta vacio: no aplica.
+                #   - Si el PNX no devolvio idiomas: no descartar (puede
+                #     ser un docid valido cuyo PNX falla esporadicamente
+                #     o un registro sin etiqueta MARC; preferimos colar a
+                #     descartar legitimos).
+                #   - Si el PNX dio una lista y NINGUN codigo coincide
+                #     con los pedidos: descartar silenciosamente. La
+                #     paginacion traera otro candidato.
+                #   - Registros multilingues (eng;spa;por) pasan en
+                #     cuanto uno solo de sus idiomas coincida; el filtro
+                #     de URL existente ya se encarga de elegir el PDF
+                #     correcto entre los disponibles.
+                if filtros.idioma and meta_pnx:
+                    idiomas_pnx = meta_pnx.get("idiomas_codigo") or []
+                    if idiomas_pnx:
+                        pedidos = set(filtros.idioma)
+                        if not (set(idiomas_pnx) & pedidos):
+                            logger.info(
+                                f"DIAGNOSTICO: doc descartado por idioma PNX "
+                                f"docid={docid_doc} pnx={idiomas_pnx} "
+                                f"pedidos={sorted(pedidos)}"
+                            )
+                            continue
+
+                # ── Paso 3: obtener URLs de descarga (sin cambios) ──
                 if doc.url_fuente:
                     urls_pdf = self._obtener_url_pdf(
                         pagina, doc.url_fuente, filtros.idioma
@@ -1099,6 +1316,112 @@ class ILOLabordocScraper(BaseScraper):
                 urls.append((download_url, label))
 
         return urls
+
+    def _consultar_pnx_para_metadatos(self, docid: str) -> dict:
+        """Consulta el endpoint PNX y devuelve los metadatos
+        bibliograficos del documento ya parseados al formato del proyecto.
+
+        El PNX (Primo Normalized XML, en JSON) es la fuente mas limpia y
+        estable para los campos autor, fecha, idioma y tipo_documento que
+        no expone la cadena edelivery -> representationInfo. Se consulta
+        en GET /primaws/rest/pub/pnxs/L/{docid} reusando el JWT guest
+        cacheado.
+
+        Devuelve un diccionario con cuatro claves: 'autor', 'fecha',
+        'idiomas_codigo' (lista de codigos cortos como ['en','es']),
+        'tipo_documento'. Los campos no encontrados quedan en cadena
+        vacia o lista vacia, segun corresponda. Si la peticion falla por
+        cualquier motivo (red, 401, 404, JSON malformado), devuelve un
+        dict vacio sin lanzar excepcion: el caller debe interpretarlo
+        como 'sin metadatos PNX' y no como error.
+
+        El idioma se entrega como lista para preservar registros
+        multilingues (un mismo documento puede aparecer marcado como
+        'eng;spa;por' en MARC). El caller decide como serializarlo."""
+        jwt = self._obtener_jwt_invitado()
+        if jwt is None:
+            return {}
+
+        url = (
+            f"{BASE_URL}/primaws/rest/pub/pnxs/L/{docid}"
+            f"?vid={VID}&lang=en"
+        )
+        try:
+            respuesta = requests.get(
+                url,
+                timeout=(10, 20),
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json, text/plain, */*",
+                    "Authorization": f"Bearer {jwt}",
+                    "Referer": (
+                        f"{BASE_URL}/discovery/fulldisplay"
+                        f"?docid={docid}&vid={VID}&lang=en"
+                    ),
+                },
+            )
+
+            # 401 -> JWT vencido. Renovar una vez y reintentar; si sigue
+            # fallando devolvemos vacio sin escalar el error.
+            if respuesta.status_code == 401:
+                self._jwt_invitado = None
+                self._jwt_obtenido_ts = 0.0
+                jwt = self._obtener_jwt_invitado()
+                if jwt is None:
+                    return {}
+                respuesta = requests.get(
+                    url,
+                    timeout=(10, 20),
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Accept": "application/json, text/plain, */*",
+                        "Authorization": f"Bearer {jwt}",
+                        "Referer": (
+                            f"{BASE_URL}/discovery/fulldisplay"
+                            f"?docid={docid}&vid={VID}&lang=en"
+                        ),
+                    },
+                )
+
+            if respuesta.status_code != 200:
+                return {}
+            datos = respuesta.json()
+        except Exception as e:
+            logger.debug(
+                f"PNX fallo para {docid}: {type(e).__name__}: {e}"
+            )
+            return {}
+
+        # El PNX viene en el primer nivel de la respuesta. Las secciones
+        # display y facets contienen los campos bibliograficos limpios.
+        pnx = datos.get("pnx") if isinstance(datos, dict) else None
+        if not isinstance(pnx, dict):
+            return {}
+        display = pnx.get("display") if isinstance(pnx, dict) else None
+        if not isinstance(display, dict):
+            display = {}
+        sort_section = pnx.get("sort") if isinstance(pnx, dict) else None
+        if not isinstance(sort_section, dict):
+            sort_section = {}
+
+        # Autor: preferimos sort.author cuando existe (texto limpio sin
+        # marcadores Primo); cae a display.creator y luego a
+        # display.contributor, ambos limpiados con _limpiar_autor_pnx.
+        autor = ""
+        sort_author = sort_section.get("author")
+        if sort_author:
+            autor = _limpiar_autor_pnx(sort_author)
+        if not autor:
+            autor = _limpiar_autor_pnx(display.get("creator"))
+        if not autor:
+            autor = _limpiar_autor_pnx(display.get("contributor"))
+
+        return {
+            "autor": autor,
+            "fecha": _extraer_anio_pnx(display.get("creationdate")),
+            "idiomas_codigo": _mapear_idiomas_pnx(display),
+            "tipo_documento": _mapear_tipo_documento_pnx(display) or "",
+        }
 
     def _obtener_url_pdf(self, pagina, url_registro: str,
                           idiomas_pedidos: Optional[List[str]] = None
